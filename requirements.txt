@@ -1,0 +1,21 @@
+# Wavly — Phase 1 Dependencies (Fixed for MediaPipe compatibility)
+# Python 3.10+ required (prefer 3.11 for mediapipe wheels)
+# Install: pip install protobuf==3.20.3 numpy==1.26.4 mediapipe==0.10.14 opencv-python==4.10.0.84 pyautogui==0.9.54 PyQt6==6.7.0 scikit-learn==1.5.1 pillow==10.4.0
+
+# Computer Vision
+opencv-python==4.10.0.84
+mediapipe==0.10.14
+protobuf>=4.25.3,<5
+
+# System Automation
+pyautogui==0.9.54
+
+# UI Overlay
+PyQt6==6.7.0
+
+# ML (classifier + trainer)
+scikit-learn==1.5.1
+numpy==1.26.4
+
+# Utilities
+pillow==10.4.0       # Required by PyAutoGUI on Windows
