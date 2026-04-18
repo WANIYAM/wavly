@@ -1,11 +1,11 @@
 """
 ActionThread — Cursor loop + Action execution.
 
-Cursor lock is now handled upstream in camera_thread + gesture_queue,
-so this thread just reads the (already-frozen) cursor position and
-clicks at it. No race condition possible.
+Actions are driven by config/gesture_bindings.py — no code changes needed
+to remap gestures. The settings UI writes to that file; this thread reads it.
 """
 
+import subprocess
 import threading
 import time
 import pyautogui
@@ -31,9 +31,19 @@ class ActionThread(threading.Thread):
         self._is_dragging: bool = False
         self._cursor_thread: Optional[threading.Thread] = None
 
+    def _get_bindings(self) -> dict:
+        """Re-import bindings every call so live edits take effect instantly."""
+        try:
+            import importlib
+            import config.gesture_bindings as gb
+            importlib.reload(gb)
+            return gb.GESTURE_BINDINGS
+        except Exception as e:
+            print(f"[ActionThread] Could not load gesture_bindings: {e}")
+            return {}
+
     def run(self):
         print("[ActionThread] Ready.")
-
         self._cursor_thread = threading.Thread(
             target=self._cursor_loop, name="CursorLoop", daemon=True
         )
@@ -53,12 +63,6 @@ class ActionThread(threading.Thread):
     # ── Cursor loop ───────────────────────────────────────────────────────
 
     def _cursor_loop(self):
-        """
-        60fps cursor movement loop.
-        gesture_queue.put_cursor() is already blocked by camera_thread
-        when an action gesture is in progress, so the position we read
-        here is guaranteed stable during a click.
-        """
         interval = 1.0 / 60.0
         while not self._stop_event.is_set():
             pos = self.gesture_queue.get_cursor()
@@ -82,68 +86,76 @@ class ActionThread(threading.Thread):
     # ── Action execution ──────────────────────────────────────────────────
 
     def _execute_action(self, event: GestureEvent):
-        name = event.name
+        bindings = self._get_bindings()
+        gesture  = event.name
+        action   = bindings.get(gesture, gesture)   # fallback: use gesture name
 
-        # Get the current smoothed position — cursor is frozen at this point
         x = int(self._smooth_x) if self._smooth_x is not None else None
         y = int(self._smooth_y) if self._smooth_y is not None else None
 
-        if name == "click":
-            self._cancel_drag()
-            if x and y:
-                pyautogui.click(x, y)
-                print(f"[Action] ✓ Click at ({x}, {y})")
-            else:
-                pyautogui.click()
-                print("[Action] ✓ Click")
+        # ── Built-in actions ──────────────────────────────────────────────
+        if action == "cursor_move":
+            pass
 
-        elif name == "double_click":
+        elif action == "click":
             self._cancel_drag()
-            if x and y:
-                pyautogui.doubleClick(x, y)
-            else:
-                pyautogui.doubleClick()
-            print(f"[Action] ✓ Double click at ({x}, {y})")
+            pyautogui.click(x, y) if (x and y) else pyautogui.click()
+            print(f"[Action] ✓ Click at ({x}, {y})")
 
-        elif name == "right_click":
+        elif action == "double_click":
             self._cancel_drag()
-            if x and y:
-                pyautogui.rightClick(x, y)
-            else:
-                pyautogui.rightClick()
-            print(f"[Action] ✓ Right click at ({x}, {y})")
+            pyautogui.doubleClick(x, y) if (x and y) else pyautogui.doubleClick()
+            print(f"[Action] ✓ Double click")
 
-        elif name == "scroll_up":
+        elif action == "right_click":
+            self._cancel_drag()
+            pyautogui.rightClick(x, y) if (x and y) else pyautogui.rightClick()
+            print(f"[Action] ✓ Right click")
+
+        elif action == "scroll_up":
             pyautogui.scroll(self.settings.scroll_speed)
             print("[Action] ✓ Scroll up")
 
-        elif name == "scroll_down":
+        elif action == "scroll_down":
             pyautogui.scroll(-self.settings.scroll_speed)
             print("[Action] ✓ Scroll down")
 
-        elif name == "drag_start":
+        elif action == "drag_start":
             if not self._is_dragging:
                 pyautogui.mouseDown()
                 self._is_dragging = True
                 print("[Action] ✓ Drag start")
 
-        elif name == "drag_end":
-            self._cancel_drag()
-
-        elif name == "zoom_in":
-            pyautogui.hotkey("ctrl", "+")
-            print("[Action] ✓ Zoom in")
-
-        elif name == "zoom_out":
-            pyautogui.hotkey("ctrl", "-")
-            print("[Action] ✓ Zoom out")
-
-        elif name == "stop":
+        elif action in ("drag_end", "stop"):
             self._cancel_drag()
             print("[Action] ✓ Stop")
 
+        elif action == "zoom_in":
+            pyautogui.hotkey("ctrl", "+")
+            print("[Action] ✓ Zoom in")
+
+        elif action == "zoom_out":
+            pyautogui.hotkey("ctrl", "-")
+            print("[Action] ✓ Zoom out")
+
+        # ── User-defined dynamic actions ──────────────────────────────────
+        elif action.startswith("hotkey:"):
+            keys = action.replace("hotkey:", "").split("+")
+            pyautogui.hotkey(*keys)
+            print(f"[Action] ✓ Hotkey: {'+'.join(keys)}")
+
+        elif action.startswith("type:"):
+            text = action.replace("type:", "")
+            pyautogui.typewrite(text, interval=0.05)
+            print(f"[Action] ✓ Typed: {text}")
+
+        elif action.startswith("run:"):
+            cmd = action.replace("run:", "")
+            subprocess.Popen(cmd, shell=True)
+            print(f"[Action] ✓ Launched: {cmd}")
+
         else:
-            print(f"[Action] Unknown: {name}")
+            print(f"[Action] Unknown action '{action}' for gesture '{gesture}'")
 
     def _cancel_drag(self):
         if self._is_dragging:
