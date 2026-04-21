@@ -1,11 +1,10 @@
 """
 SettingsWindow — PyQt6 GUI for managing gesture bindings and sensitivity.
 
-Fixes:
-  - Trainer launches using the same Python interpreter as Wavly
-    (so it uses the same venv with sklearn installed)
-  - Pause only stops gesture processing — physical mouse is never frozen
-  - Camera is released so trainer can access it
+Quit options available to user (no terminal needed):
+  - Footer "Quit Wavly" button (bottom-left of this window)
+  - Tray icon right-click → Quit Wavly
+  - Ctrl+Shift+Q from anywhere
 """
 
 import os
@@ -25,28 +24,30 @@ from PyQt6.QtGui import QFont
 
 
 BUILTIN_ACTIONS = [
-    ("Move cursor",    "cursor_move"),
-    ("Left click",     "click"),
-    ("Right click",    "right_click"),
-    ("Double click",   "double_click"),
-    ("Scroll up",      "scroll_up"),
-    ("Scroll down",    "scroll_down"),
-    ("Start drag",     "drag_start"),
-    ("Stop / release", "stop"),
-    ("Zoom in",        "zoom_in"),
-    ("Zoom out",       "zoom_out"),
-    ("Custom…",        "__custom__"),
+    ("Move cursor",      "cursor_move"),
+    ("Left click",       "click"),
+    ("Right click",      "right_click"),
+    ("Double click",     "double_click"),
+    ("Scroll up",        "scroll_up"),
+    ("Scroll down",      "scroll_down"),
+    ("Start drag",       "drag_start"),
+    ("Stop / release",   "stop"),
+    ("Zoom in",          "zoom_in"),
+    ("Zoom out",         "zoom_out"),
+    ("Show keyboard ⌨️", "show_keyboard"),
+    ("Custom…",          "__custom__"),
 ]
 
 GESTURE_ICONS = {
-    "cursor_move":  "☝️",
-    "click":        "🤌",
-    "scroll_up":    "✌️",
-    "scroll_down":  "✌️",
-    "drag_start":   "✊",
-    "stop":         "🖐️",
-    "zoom_in":      "🤏",
-    "zoom_out":     "🤏",
+    "cursor_move":   "☝️",
+    "click":         "🤌",
+    "scroll_up":     "✌️",
+    "scroll_down":   "✌️",
+    "drag_start":    "✊",
+    "stop":          "🖐️",
+    "zoom_in":       "🤏",
+    "zoom_out":      "🤏",
+    "three_fingers": "🤟",
 }
 
 BINDINGS_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "gesture_bindings.py")
@@ -56,8 +57,6 @@ MODEL_PATH    = os.path.abspath(
 TRAINER_PATH  = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "gestures", "trainer.py")
 )
-
-# Always use the same Python that's running Wavly — guarantees correct venv
 PYTHON_EXE = sys.executable
 
 
@@ -179,8 +178,8 @@ class GestureRow(QWidget):
 
 class SettingsWindow(QWidget):
 
-    # Injected by WavlyTray so we can pause the camera for training
-    camera_thread = None
+    camera_thread = None   # injected by WavlyTray
+    quit_fn       = None   # injected by main.py
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -200,16 +199,21 @@ class SettingsWindow(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
+        # Header
         header = QWidget()
         header.setStyleSheet("background:#fafafa; border-bottom:1px solid #e8e8e8;")
         hl = QHBoxLayout(header)
         hl.setContentsMargins(20, 14, 20, 14)
         title = QLabel("Wavly Settings")
         title.setFont(QFont("Segoe UI", 13, QFont.Weight.Medium))
+        shortcut_hint = QLabel("Ctrl+Shift+Q to quit anytime")
+        shortcut_hint.setStyleSheet("color:#bbb; font-size:10px;")
         hl.addWidget(title)
         hl.addStretch()
+        hl.addWidget(shortcut_hint)
         root.addWidget(header)
 
+        # Tabs
         self.tabs = QTabWidget()
         self.tabs.setStyleSheet("""
             QTabWidget::pane { border: none; }
@@ -220,19 +224,47 @@ class SettingsWindow(QWidget):
         self.tabs.addTab(self._build_sensitivity_tab(), "Sensitivity")
         root.addWidget(self.tabs)
 
+        # Footer — Quit button on left, status + Save on right
         footer = QWidget()
         footer.setStyleSheet("background:#fafafa; border-top:1px solid #e8e8e8;")
         fl = QHBoxLayout(footer)
         fl.setContentsMargins(20, 12, 20, 12)
+        fl.setSpacing(10)
+
+        # Quit button — always visible, bottom-left
+        quit_btn = QPushButton("✕  Quit Wavly")
+        quit_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #e5534b;
+                border: 1px solid #fca5a5;
+                border-radius: 7px;
+                padding: 7px 16px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background: #fef2f2;
+                border-color: #e5534b;
+            }
+            QPushButton:pressed { background: #fee2e2; }
+        """)
+        quit_btn.clicked.connect(self._quit)
+
         self.status_msg = QLabel("")
         self.status_msg.setStyleSheet("color:#22c55e; font-size:11px;")
+
         save_btn = QPushButton("Save changes")
         save_btn.setStyleSheet("""
-            QPushButton { background:#111; color:white; border:none; border-radius:7px;
-                          padding:8px 22px; font-size:12px; font-weight:600; }
+            QPushButton {
+                background:#111; color:white; border:none;
+                border-radius:7px; padding:8px 22px;
+                font-size:12px; font-weight:600;
+            }
             QPushButton:hover { background:#333; }
         """)
         save_btn.clicked.connect(self._save)
+
+        fl.addWidget(quit_btn)
         fl.addWidget(self.status_msg)
         fl.addStretch()
         fl.addWidget(save_btn)
@@ -369,6 +401,20 @@ class SettingsWindow(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Save failed", str(e))
 
+    # ── Quit ─────────────────────────────────────────────────────────────
+
+    def _quit(self):
+        reply = QMessageBox.question(
+            self, "Quit Wavly",
+            "Stop gesture control and quit Wavly?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            if SettingsWindow.quit_fn is not None:
+                SettingsWindow.quit_fn()
+            else:
+                QApplication.quit()
+
     # ── Trainer ───────────────────────────────────────────────────────────
 
     def _launch_trainer(self):
@@ -387,13 +433,10 @@ class SettingsWindow(QWidget):
         if reply != QMessageBox.StandardButton.Ok:
             return
 
-        # Note the model file time BEFORE training so we can detect when it changes
         self._model_mtime_before = (
             os.path.getmtime(MODEL_PATH) if os.path.exists(MODEL_PATH) else 0
         )
 
-        # Pause Wavly — releases camera, stops gesture actions
-        # Physical mouse is unaffected (PyAutoGUI is not involved here)
         if SettingsWindow.camera_thread is not None:
             SettingsWindow.camera_thread.pause()
 
@@ -404,8 +447,6 @@ class SettingsWindow(QWidget):
         )
         self.status_msg.setText("Wavly paused — your mouse works normally")
 
-        # Launch trainer using THE SAME Python/venv as Wavly
-        # This guarantees sklearn, mediapipe etc. are all available
         if sys.platform == "win32":
             subprocess.Popen(
                 f'start cmd /k "{PYTHON_EXE}" "{TRAINER_PATH}"',
@@ -416,7 +457,6 @@ class SettingsWindow(QWidget):
                 ["x-terminal-emulator", "-e", PYTHON_EXE, TRAINER_PATH]
             )
 
-        # Poll every 2s for model file update (signals training finished)
         self._poll_timer = QTimer(self)
         self._poll_timer.timeout.connect(self._check_training_done)
         self._poll_timer.start(2000)
@@ -424,13 +464,11 @@ class SettingsWindow(QWidget):
     def _check_training_done(self):
         if not os.path.exists(MODEL_PATH):
             return
-        new_mtime = os.path.getmtime(MODEL_PATH)
-        if new_mtime > self._model_mtime_before:
+        if os.path.getmtime(MODEL_PATH) > self._model_mtime_before:
             self._poll_timer.stop()
             self._on_training_done()
 
     def _on_training_done(self):
-        # Resume Wavly
         if SettingsWindow.camera_thread is not None:
             SettingsWindow.camera_thread.resume()
 
@@ -439,10 +477,7 @@ class SettingsWindow(QWidget):
         self._banner_txt.setText(
             "Want to teach Wavly a new gesture? Record it with your camera."
         )
-
-        # Reload — new gesture appears in the list
         self._load()
-
         self.status_msg.setText("✓ New gesture recorded! Assign an action and hit Save.")
         QTimer.singleShot(6000, lambda: self.status_msg.setText(""))
 

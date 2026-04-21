@@ -37,12 +37,13 @@ from config.settings import Settings
 
 # ── Gestures to train ────────────────────────────────────────────────────────
 GESTURES = [
-    ("cursor_move", "☝️  Point with INDEX finger only — others curled"),
-    ("click",       "🤌  Pinch: bring THUMB + INDEX tips together"),
-    ("scroll_up",   "✌️  INDEX + MIDDLE up, hand raised HIGH"),
-    ("scroll_down", "✌️  INDEX + MIDDLE up, hand held LOW"),
-    ("drag_start",  "✊  Closed FIST — all fingers curled"),
-    ("stop",        "🖐️  Open PALM facing camera — all 5 fingers spread"),
+    ("cursor_move",   "☝️  Point with INDEX finger only — others curled"),
+    ("click",         "🤌  Pinch: bring THUMB + INDEX tips together"),
+    ("scroll_up",     "✌️  INDEX + MIDDLE up, hand raised HIGH"),
+    ("scroll_down",   "✌️  INDEX + MIDDLE up, hand held LOW"),
+    ("drag_start",    "✊  Closed FIST — all fingers curled"),
+    ("stop",          "🖐️  Open PALM facing camera — all 5 fingers spread"),
+    ("three_fingers", "🤟  INDEX + MIDDLE + RING up — pinky and thumb curled"),
 ]
 
 SAMPLES     = 300   # per gesture

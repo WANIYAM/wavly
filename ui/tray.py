@@ -4,12 +4,16 @@ WavlyTray — System tray icon for Wavly.
 Right-click menu:
   Open Settings  → opens SettingsWindow
   Pause / Resume → pauses gesture recognition (releases camera)
-  Quit           → shuts everything down
+  ─────────────
+  Quit Wavly    → clean shutdown (no terminal needed)
+
+Also: Ctrl+Shift+Q works globally from anywhere.
 """
 
 from PyQt6.QtWidgets import QSystemTrayIcon, QMenu
 from PyQt6.QtGui import QIcon, QPixmap, QColor, QPainter, QBrush
 from PyQt6.QtCore import Qt, QTimer
+from typing import Callable, Optional
 
 
 def _make_icon(active: bool = True) -> QIcon:
@@ -34,16 +38,17 @@ def _make_icon(active: bool = True) -> QIcon:
 
 class WavlyTray(QSystemTrayIcon):
 
-    def __init__(self, camera_thread, action_thread, settings_window_class, app, parent=None):
+    def __init__(self, camera_thread, action_thread, settings_window_class,
+                 app, quit_fn: Optional[Callable] = None, parent=None):
         super().__init__(parent)
         self._camera_thread = camera_thread
         self._action_thread = action_thread
         self._settings_cls  = settings_window_class
         self._app           = app
+        self._quit_fn       = quit_fn or self._default_quit
         self._settings_win  = None
         self._paused        = False
 
-        # Inject camera_thread into SettingsWindow so it can pause before training
         settings_window_class.camera_thread = camera_thread
 
         self.setIcon(_make_icon(active=True))
@@ -58,26 +63,31 @@ class WavlyTray(QSystemTrayIcon):
         if self.isSystemTrayAvailable() and self.isVisible():
             self.showMessage(
                 "Wavly started",
-                "Gesture control is active.\nRight-click this icon for options.",
+                "Gesture control is active.\n"
+                "Right-click this icon for options.\n"
+                "Press Ctrl+Shift+Q to quit anytime.",
                 QSystemTrayIcon.MessageIcon.Information,
-                3000,
+                4000,
             )
 
     def _build_menu(self):
         menu = QMenu()
-        header = menu.addAction("Wavly")
+
+        header = menu.addAction("Wavly 🖐️")
         header.setEnabled(False)
         menu.addSeparator()
 
-        settings_act = menu.addAction("Open Settings")
+        settings_act = menu.addAction("⚙️  Open Settings")
         settings_act.triggered.connect(self._open_settings)
 
-        self._pause_act = menu.addAction("Pause")
+        self._pause_act = menu.addAction("⏸  Pause")
         self._pause_act.triggered.connect(self._toggle_pause)
 
         menu.addSeparator()
-        quit_act = menu.addAction("Quit Wavly")
-        quit_act.triggered.connect(self._quit)
+
+        quit_act = menu.addAction("✕  Quit Wavly")
+        quit_act.triggered.connect(self._quit_fn)
+
         self.setContextMenu(menu)
 
     def _on_activated(self, reason):
@@ -98,18 +108,18 @@ class WavlyTray(QSystemTrayIcon):
         self._paused = not self._paused
         if self._paused:
             self._camera_thread.pause()
-            self._pause_act.setText("Resume")
+            self._pause_act.setText("▶  Resume")
             self.setIcon(_make_icon(active=False))
             self.setToolTip("Wavly — paused")
             self.showMessage("Wavly", "Paused.", QSystemTrayIcon.MessageIcon.Information, 1500)
         else:
             self._camera_thread.resume()
-            self._pause_act.setText("Pause")
+            self._pause_act.setText("⏸  Pause")
             self.setIcon(_make_icon(active=True))
             self.setToolTip("Wavly — gesture control active")
             self.showMessage("Wavly", "Resumed.", QSystemTrayIcon.MessageIcon.Information, 1500)
 
-    def _quit(self):
+    def _default_quit(self):
         self._camera_thread.stop()
         self._action_thread.stop()
         self._app.quit()
