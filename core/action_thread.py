@@ -1,10 +1,9 @@
 """
-ActionThread — Phase 3
+ActionThread — Phase 4 Feature 2 update.
 
-Now integrates:
-  - Context-aware action resolution (browser/editor/media/presentation)
-  - Air drawing letter → command dispatch
-  - All previous gesture actions
+Handles voice:action events fired by VoiceThread through GestureQueue.
+All voice actions go through the same _run_action() path as gesture actions
+so context awareness works for voice commands too.
 """
 
 import subprocess
@@ -14,9 +13,7 @@ import pyautogui
 from typing import Optional, Callable
 
 from core.gesture_queue import GestureQueue, GestureEvent
-from core.context_manager import ContextManager
 from config.settings import Settings
-from gestures.air_drawing import DEFAULT_LETTER_ACTIONS
 
 pyautogui.FAILSAFE = True
 pyautogui.PAUSE = 0
@@ -26,7 +23,7 @@ class ActionThread(threading.Thread):
 
     def __init__(self, gesture_queue: GestureQueue, settings: Settings,
                  keyboard_toggle_fn: Optional[Callable] = None,
-                 context_manager: Optional[ContextManager] = None):
+                 context_manager=None):
         super().__init__(name="ActionThread")
         self.gesture_queue    = gesture_queue
         self.settings         = settings
@@ -97,17 +94,27 @@ class ActionThread(threading.Thread):
     def _execute_action(self, event: GestureEvent):
         gesture = event.name
 
-        # ── Air drawing letter dispatch ───────────────────────────────────
+        # ── Air drawing letter ────────────────────────────────────────────
         if gesture.startswith("air_letter:"):
             letter = gesture.split(":")[1]
             self._execute_letter(letter)
+            return
+
+        # ── Voice command ─────────────────────────────────────────────────
+        # VoiceThread fires events as "voice:action_string"
+        # Strip prefix and run the action directly
+        if gesture.startswith("voice:"):
+            action = gesture[6:]   # remove "voice:" prefix
+            x = int(self._smooth_x) if self._smooth_x is not None else None
+            y = int(self._smooth_y) if self._smooth_y is not None else None
+            print(f"[Action] 🎤 Voice → {action}")
+            self._run_action(action, "voice", x, y)
             return
 
         # ── Gesture → action via bindings + context override ──────────────
         bindings       = self._get_bindings()
         default_action = bindings.get(gesture, gesture)
 
-        # Context manager can override the action based on active app
         if self._context_mgr is not None:
             action = self._context_mgr.resolve_action(gesture, default_action)
         else:
@@ -118,96 +125,95 @@ class ActionThread(threading.Thread):
 
         self._run_action(action, gesture, x, y)
 
-    def _run_action(self, action: str, gesture: str, x, y):
+    def _run_action(self, action: str, source: str, x, y):
         if action == "cursor_move":
             pass
+
         elif action == "click":
             self._cancel_drag()
             pyautogui.click(x, y) if (x and y) else pyautogui.click()
-            print(f"[Action] ✓ Click ({x},{y})")
+            print(f"[Action] ✓ Click ({source})")
+
         elif action == "double_click":
             self._cancel_drag()
             pyautogui.doubleClick(x, y) if (x and y) else pyautogui.doubleClick()
-            print("[Action] ✓ Double click")
+            print(f"[Action] ✓ Double click ({source})")
+
         elif action == "right_click":
             self._cancel_drag()
             pyautogui.rightClick(x, y) if (x and y) else pyautogui.rightClick()
-            print("[Action] ✓ Right click")
+            print(f"[Action] ✓ Right click ({source})")
+
         elif action == "scroll_up":
             pyautogui.scroll(self.settings.scroll_speed)
-            print("[Action] ✓ Scroll up")
+            print(f"[Action] ✓ Scroll up ({source})")
+
         elif action == "scroll_down":
             pyautogui.scroll(-self.settings.scroll_speed)
-            print("[Action] ✓ Scroll down")
+            print(f"[Action] ✓ Scroll down ({source})")
+
         elif action == "drag_start":
             if not self._is_dragging:
                 pyautogui.mouseDown()
                 self._is_dragging = True
-                print("[Action] ✓ Drag start")
+                print(f"[Action] ✓ Drag start ({source})")
+
         elif action in ("drag_end", "stop"):
             self._cancel_drag()
-            print("[Action] ✓ Stop")
+            print(f"[Action] ✓ Stop ({source})")
+
         elif action == "zoom_in":
             pyautogui.hotkey("ctrl", "+")
-            print("[Action] ✓ Zoom in")
+            print(f"[Action] ✓ Zoom in ({source})")
+
         elif action == "zoom_out":
             pyautogui.hotkey("ctrl", "-")
-            print("[Action] ✓ Zoom out")
+            print(f"[Action] ✓ Zoom out ({source})")
+
         elif action == "show_keyboard":
             if self._keyboard_toggle:
                 self._keyboard_toggle()
-                print("[Action] ✓ Keyboard toggled")
+                print(f"[Action] ✓ Keyboard toggled ({source})")
+
         elif action.startswith("hotkey:"):
             keys = action.replace("hotkey:", "").split("+")
             pyautogui.hotkey(*keys)
-            print(f"[Action] ✓ Hotkey: {'+'.join(keys)}")
+            print(f"[Action] ✓ Hotkey {'+'.join(keys)} ({source})")
+
         elif action.startswith("type:"):
             pyautogui.typewrite(action.replace("type:", ""), interval=0.05)
-            print("[Action] ✓ Typed")
+            print(f"[Action] ✓ Typed ({source})")
+
         elif action.startswith("run:"):
             subprocess.Popen(action.replace("run:", ""), shell=True)
-            print(f"[Action] ✓ Launched: {action[4:]}")
+            print(f"[Action] ✓ Launched {action[4:]} ({source})")
+
         else:
-            print(f"[Action] Unknown: '{action}' for gesture '{gesture}'")
+            print(f"[Action] Unknown: '{action}' from {source}")
+
+    # ── Air draw letter ───────────────────────────────────────────────────
 
     def _execute_letter(self, letter: str):
-        """
-        Execute the command bound to an air-drawn letter.
-        Reads from config/air_draw_bindings.py — user editable,
-        changes apply instantly without restart.
-        """
         action = self._get_air_draw_action(letter.upper())
         if action is None:
             print(f"[Action] Air letter '{letter}' has no binding")
             return
-
         if action.startswith("hotkey:"):
             keys = action.replace("hotkey:", "").split("+")
             pyautogui.hotkey(*keys)
             print(f"[Action] ✓ Air draw '{letter}' → {action}")
         elif action.startswith("run:"):
             subprocess.Popen(action.replace("run:", ""), shell=True)
-            print(f"[Action] ✓ Air draw '{letter}' → {action}")
         elif action.startswith("type:"):
             pyautogui.typewrite(action.replace("type:", ""), interval=0.05)
-            print(f"[Action] ✓ Air draw '{letter}' → typed")
 
     def _get_air_draw_action(self, letter: str):
-        """Load bindings fresh so live edits to the config apply instantly."""
         try:
             import importlib
             import config.air_draw_bindings as adb
             importlib.reload(adb)
             return adb.AIR_DRAW_BINDINGS.get(letter)
         except Exception:
-            from gestures.air_drawing import DEFAULT_LETTER_ACTIONS
-            entry = DEFAULT_LETTER_ACTIONS.get(letter)
-            if entry:
-                kind, args = entry
-                if kind == "hotkey":
-                    return "hotkey:" + "+".join(args)
-                elif kind == "run":
-                    return "run:" + " ".join(args)
             return None
 
     def _cancel_drag(self):

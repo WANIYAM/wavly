@@ -1,10 +1,8 @@
 """
-CameraThread — Phase 3
+CameraThread — Phase 4 update.
 
-Added:
-  - Air drawing detection in gesture mode
-  - Passes air_letter events through GestureQueue when stroke recognised
-  - Context-aware mode indicator in debug overlay
+Uses AdaptiveEngine to get per-gesture hold_frames and confidence
+threshold instead of global settings values. Everything else unchanged.
 """
 
 import threading
@@ -16,21 +14,28 @@ from typing import Optional, Tuple, Callable
 from core.gesture_queue import GestureQueue, GestureEvent
 from gestures.classifier import GestureClassifier, CURSOR_MOVE, UNKNOWN
 from gestures.landmark_utils import LandmarkUtils
-from gestures.air_drawing import AirDrawManager
 from config.settings import Settings
 
 KEYBOARD_TOGGLE_GESTURE = "three_fingers"
 
+try:
+    from gestures.air_drawing import AirDrawManager
+    AIR_DRAW_AVAILABLE = True
+except ImportError:
+    AIR_DRAW_AVAILABLE = False
+
 
 class CameraThread(threading.Thread):
 
-    def __init__(self, gesture_queue: GestureQueue, settings: Settings):
+    def __init__(self, gesture_queue: GestureQueue, settings: Settings,
+                 adaptive_engine=None):
         super().__init__(name="CameraThread")
-        self.gesture_queue = gesture_queue
-        self.settings      = settings
-        self._stop_event   = threading.Event()
-        self._paused       = False
-        self._pause_lock   = threading.Lock()
+        self.gesture_queue   = gesture_queue
+        self.settings        = settings
+        self._adaptive       = adaptive_engine   # Phase 4
+        self._stop_event     = threading.Event()
+        self._paused         = False
+        self._pause_lock     = threading.Lock()
 
         self._keyboard_update_fn:  Optional[Callable] = None
         self._keyboard_visible_fn: Optional[Callable] = None
@@ -46,11 +51,13 @@ class CameraThread(threading.Thread):
 
         self.classifier = GestureClassifier(settings)
 
-        # Air drawing manager — fires letter events through gesture queue
-        self._air_draw = AirDrawManager(
-            settings,
-            on_letter_fn=self._on_air_letter,
-        )
+        if AIR_DRAW_AVAILABLE:
+            self._air_draw = AirDrawManager(
+                settings,
+                on_letter_fn=self._on_air_letter,
+            )
+        else:
+            self._air_draw = None
 
         import pyautogui
         self.screen_w, self.screen_h = pyautogui.size()
@@ -64,6 +71,22 @@ class CameraThread(threading.Thread):
         self._keyboard_update_fn  = update_fn
         self._keyboard_visible_fn = visible_fn
 
+    # ── Adaptive helpers ──────────────────────────────────────────────────
+
+    def _hold_frames(self, gesture: str) -> int:
+        """Per-gesture hold_frames from adaptive engine, or global default."""
+        if self._adaptive:
+            return self._adaptive.get_hold_frames(gesture, self.settings.hold_frames)
+        return self.settings.hold_frames
+
+    def _conf_threshold(self, gesture: str) -> float:
+        """Per-gesture confidence threshold, or global default."""
+        if self._adaptive:
+            return self._adaptive.get_confidence_threshold(
+                gesture, self.settings.ml_confidence_threshold
+            )
+        return self.settings.ml_confidence_threshold
+
     # ── Pause / Resume ────────────────────────────────────────────────────
 
     def pause(self):
@@ -75,7 +98,6 @@ class CameraThread(threading.Thread):
     def resume(self):
         with self._pause_lock:
             self._paused = False
-        # Reload classifier model in case it was retrained while paused
         self.classifier.reload()
         print("[CameraThread] Resumed.")
 
@@ -83,10 +105,7 @@ class CameraThread(threading.Thread):
         with self._pause_lock:
             return self._paused
 
-    # ── Air drawing callback ──────────────────────────────────────────────
-
     def _on_air_letter(self, letter: str, confidence: float):
-        """Called by AirDrawManager when a stroke is recognised."""
         self.gesture_queue.put_action(GestureEvent(
             name=f"air_letter:{letter}",
             confidence=confidence,
@@ -159,31 +178,26 @@ class CameraThread(threading.Thread):
 
         if results.multi_hand_landmarks and results.multi_handedness:
             for hl, hd in zip(results.multi_hand_landmarks, results.multi_handedness):
-                label = hd.classification[0].label
-                tip   = hl.landmark[8]
-                sx    = int(tip.x * self.screen_w)
-                sy    = int(tip.y * self.screen_h)
-
-                features   = LandmarkUtils.landmarks_to_features(hl)
-                pinch_dist = float(features[-1])
+                label    = hd.classification[0].label
+                tip      = hl.landmark[8]
+                sx       = int(tip.x * self.screen_w)
+                sy       = int(tip.y * self.screen_h)
+                features = LandmarkUtils.landmarks_to_features(hl)
+                pinch    = float(features[-1])
 
                 gesture_name, confidence = self.classifier.predict(features)
                 if gesture_name == KEYBOARD_TOGGLE_GESTURE:
-                    self._debounce_and_fire(
-                        KEYBOARD_TOGGLE_GESTURE, confidence, sx, sy
-                    )
+                    self._debounce_and_fire(KEYBOARD_TOGGLE_GESTURE, confidence, sx, sy)
                 else:
                     if self._pending_gesture == KEYBOARD_TOGGLE_GESTURE:
                         self._reset_debounce()
 
                 if label == "Left":
-                    right_pos   = (sx, sy)
-                    right_pinch = pinch_dist
+                    right_pos, right_pinch = (sx, sy), pinch
                 else:
-                    left_pos   = (sx, sy)
-                    left_pinch = pinch_dist
+                    left_pos,  left_pinch  = (sx, sy), pinch
 
-        if self._keyboard_update_fn is not None:
+        if self._keyboard_update_fn:
             self._keyboard_update_fn(left_pos, right_pos, left_pinch, right_pinch)
 
     # ── Gesture mode ──────────────────────────────────────────────────────
@@ -194,37 +208,37 @@ class CameraThread(threading.Thread):
             self.gesture_queue.unlock_cursor()
             return
 
-        hand_landmarks = results.multi_hand_landmarks[0]
-        features       = LandmarkUtils.landmarks_to_features(hand_landmarks)
-        tip            = hand_landmarks.landmark[8]
-        cursor_x, cursor_y = self._map_cursor(tip.x, tip.y)
+        hand_landmarks           = results.multi_hand_landmarks[0]
+        features                 = LandmarkUtils.landmarks_to_features(hand_landmarks)
+        tip                      = hand_landmarks.landmark[8]
+        cursor_x, cursor_y       = self._map_cursor(tip.x, tip.y)
         gesture_name, confidence = self.classifier.predict(features)
 
-        # ── Air drawing intercept ─────────────────────────────────────────
-        if self.settings.air_drawing_enabled:
-            draw_status = self._air_draw.process(
-                gesture_name, tip.x, tip.y, confidence
-            )
+        # Air drawing intercept
+        if self._air_draw and hasattr(self.settings, 'air_drawing_enabled') \
+                and self.settings.air_drawing_enabled:
+            draw_status = self._air_draw.process(gesture_name, tip.x, tip.y, confidence)
             if self._air_draw.is_drawing:
-                # Show stroke trail on debug frame
                 if self.settings.show_debug_window:
                     pts = self._air_draw.get_stroke_pts()
                     h, w = frame.shape[:2]
                     for i in range(len(pts) - 1):
-                        p1 = (int(pts[i][0] * w),   int(pts[i][1] * h))
-                        p2 = (int(pts[i+1][0] * w), int(pts[i+1][1] * h))
+                        p1 = (int(pts[i][0]*w),   int(pts[i][1]*h))
+                        p2 = (int(pts[i+1][0]*w), int(pts[i+1][1]*h))
                         cv2.line(frame, p1, p2, (0, 200, 255), 2)
-                    cv2.putText(frame, f"✏ Drawing... ({len(pts)} pts)",
+                    cv2.putText(frame, f"Drawing... ({len(pts)} pts)",
                                 (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
                                 0.65, (0, 200, 255), 2)
-                return   # while drawing, skip normal gesture processing
+                return
 
-        # ── Normal gesture processing ─────────────────────────────────────
+        # ── Phase 4: use per-gesture threshold from adaptive engine ───────
+        adapted_threshold = self._conf_threshold(gesture_name)
+        if confidence < adapted_threshold and gesture_name not in (CURSOR_MOVE, UNKNOWN):
+            gesture_name = UNKNOWN
+
         if gesture_name in (CURSOR_MOVE, UNKNOWN):
             self.gesture_queue.unlock_cursor()
             self.gesture_queue.put_cursor(cursor_x, cursor_y, confidence)
-            # FIX: only reset debounce if we were tracking an action gesture
-            # Don't blindly reset on every cursor frame
             if self._pending_gesture not in ("", CURSOR_MOVE):
                 self._reset_debounce()
             self._pending_gesture = CURSOR_MOVE
@@ -237,24 +251,31 @@ class CameraThread(threading.Thread):
             self.mp_draw.draw_landmarks(
                 frame, hand_landmarks, self.mp_hands.HAND_CONNECTIONS
             )
+            # Show adapted hold_frames in debug overlay
+            adapted_hold = self._hold_frames(gesture_name)
             label = (f"{gesture_name} {confidence:.2f} "
-                     f"[{self._pending_frames}/{self.settings.hold_frames}]")
+                     f"[{self._pending_frames}/{adapted_hold}]")
             cv2.putText(frame, label, (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 120), 2)
 
-    # ── Debounce ──────────────────────────────────────────────────────────
+    # ── Debounce — uses per-gesture hold_frames from adaptive engine ──────
 
     def _debounce_and_fire(self, gesture: str, confidence: float, cx: int, cy: int):
         if self._cooldown_frames > 0:
             self._cooldown_frames -= 1
             return
+
         if gesture == self._pending_gesture:
             self._pending_frames += 1
         else:
             self._pending_gesture = gesture
             self._pending_frames  = 1
             self._last_fired      = ""
-        if self._pending_frames >= self.settings.hold_frames:
+
+        # ── Phase 4: per-gesture hold threshold ───────────────────────────
+        hold_needed = self._hold_frames(gesture)
+
+        if self._pending_frames >= hold_needed:
             if gesture != self._last_fired:
                 self._last_fired      = gesture
                 self._pending_frames  = 0
@@ -263,7 +284,8 @@ class CameraThread(threading.Thread):
                     name=gesture, confidence=confidence,
                     cursor_x=cx, cursor_y=cy,
                 ))
-                print(f"[Camera] Fired: {gesture} ({confidence:.2f})")
+                print(f"[Camera] Fired: {gesture} ({confidence:.2f}) "
+                      f"hold={hold_needed}")
 
     def _reset_debounce(self):
         if self._pending_gesture not in ("", CURSOR_MOVE):

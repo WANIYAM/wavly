@@ -1,19 +1,16 @@
 """
 GestureQueue — Thread-safe bridge between vision and action threads.
 
-Two channels:
-  - cursor: latest position, overwrite-only (no queue)
-  - actions: discrete gesture events (click, scroll etc.) FIFO
-
-Cursor lock: camera thread calls lock_cursor() the moment a non-cursor
-gesture starts building up. This freezes the cursor at its current
-position so it doesn't drift during the debounce window.
+Phase 4 addition:
+  register_observer(fn) — registers a callable that gets notified every
+  time a gesture fires. AdaptiveEngine uses this to silently monitor
+  the gesture stream without interfering with the main pipeline.
 """
 
 import queue
 import threading
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Callable
 import time
 
 
@@ -29,42 +26,58 @@ class GestureEvent:
 class GestureQueue:
 
     def __init__(self):
-        # Latest cursor position — overwrite only
         self._cursor_x: Optional[int] = None
         self._cursor_y: Optional[int] = None
-        self._cursor_lock = threading.Lock()
-
-        # Cursor locked: True = don't update cursor position
+        self._cursor_lock   = threading.Lock()
         self._cursor_locked: bool = False
 
-        # Discrete action events
         self._action_queue: queue.Queue = queue.Queue(maxsize=20)
 
-        # Latest event for UI
         self._latest_event: Optional[GestureEvent] = None
-        self._latest_lock = threading.Lock()
+        self._latest_lock   = threading.Lock()
+
+        # Phase 4: observer callbacks — called on every put_action()
+        self._observers: list[Callable] = []
+        self._observers_lock = threading.Lock()
+
+    # ── Observer API (Phase 4) ────────────────────────────────────────────
+
+    def register_observer(self, fn: Callable):
+        """
+        Register a callback invoked every time a discrete gesture fires.
+        Signature: fn(gesture_name: str, confidence: float, timestamp: float)
+        Callbacks are called synchronously in the camera thread — keep them fast.
+        """
+        with self._observers_lock:
+            self._observers.append(fn)
+
+    def _notify_observers(self, event: GestureEvent):
+        with self._observers_lock:
+            observers = list(self._observers)
+        for fn in observers:
+            try:
+                fn(event.name, event.confidence, event.timestamp)
+            except Exception as e:
+                print(f"[GestureQueue] Observer error: {e}")
 
     # ── Cursor channel ────────────────────────────────────────────────────
 
     def put_cursor(self, x: int, y: int, confidence: float = 0.9):
-        """Update cursor position. Ignored if cursor is locked."""
         with self._cursor_lock:
             if not self._cursor_locked:
                 self._cursor_x = x
                 self._cursor_y = y
-
         with self._latest_lock:
             self._latest_event = GestureEvent(
-                name="cursor_move", confidence=confidence, cursor_x=x, cursor_y=y
+                name="cursor_move", confidence=confidence,
+                cursor_x=x, cursor_y=y
             )
 
     def lock_cursor(self):
-        """Freeze cursor at current position. Called when action gesture starts."""
         with self._cursor_lock:
             self._cursor_locked = True
 
     def unlock_cursor(self):
-        """Resume cursor updates."""
         with self._cursor_lock:
             self._cursor_locked = False
 
@@ -83,6 +96,8 @@ class GestureQueue:
             self._action_queue.put_nowait(event)
         except queue.Full:
             pass
+        # Notify observers (adaptive engine, overlay, etc.)
+        self._notify_observers(event)
 
     def get_action(self, timeout: float = 0.05) -> Optional[GestureEvent]:
         try:
@@ -96,8 +111,8 @@ class GestureQueue:
 
     def clear(self):
         with self._cursor_lock:
-            self._cursor_x = None
-            self._cursor_y = None
+            self._cursor_x      = None
+            self._cursor_y      = None
             self._cursor_locked = False
         while not self._action_queue.empty():
             try:
