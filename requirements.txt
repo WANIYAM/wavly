@@ -1,24 +1,34 @@
-# Wavly — Dependencies
-# Python 3.10 or 3.11 required (NOT 3.12 — no MediaPipe wheel)
-# Install order matters:
-#   pip install protobuf==3.20.3 numpy==1.26.4 mediapipe==0.10.14
-#   pip install opencv-python==4.10.0.84 pyautogui==0.9.54 PyQt6==6.7.0 scikit-learn==1.5.1 pillow==10.4.0 pyperclip
+# Wavly — Full Dependency List (Phase 1 + 2 + 3)
+# Python 3.11 required (3.12 NOT supported — no MediaPipe wheel)
+#
+# Install in this exact order to avoid conflicts:
+#
+#   pip install --upgrade pip setuptools wheel
+#   pip install protobuf==3.20.3
+#   pip install numpy==1.26.4
+#   pip install mediapipe==0.10.14
+#   pip install opencv-python==4.10.0.84 pyautogui==0.9.54 PyQt6==6.7.0
+#   pip install scikit-learn==1.5.1 pillow==10.4.0 pyperclip pywin32 psutil
 
-# Computer Vision
+# ── Computer Vision ───────────────────────────────────────────────────────────
 opencv-python==4.10.0.84
 mediapipe==0.10.14
-protobuf==3.20.3        # Must be 3.x — 4.x breaks mediapipe bindings
+protobuf==3.20.3        # MUST be 3.x — 4.x breaks mediapipe google namespace
 
-# System Automation
+# ── System Automation ─────────────────────────────────────────────────────────
 pyautogui==0.9.54
-pyperclip                # Clipboard-based typing — handles all unicode characters
+pyperclip               # Clipboard typing for on-screen keyboard (unicode safe)
 
-# UI
+# ── UI ────────────────────────────────────────────────────────────────────────
 PyQt6==6.7.0
 
-# ML
+# ── Machine Learning ──────────────────────────────────────────────────────────
 scikit-learn==1.5.1
-numpy==1.26.4            # Must be 1.x — 2.x breaks mediapipe C extensions
+numpy==1.26.4           # MUST be 1.x — 2.x breaks mediapipe C extensions
 
-# Utilities
-pillow==10.4.0           # Required by PyAutoGUI on Windows
+# ── Context Awareness (Phase 3) ───────────────────────────────────────────────
+pywin32                 # Windows active window detection (win32gui)
+psutil                  # Process name lookup for context manager
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+pillow==10.4.0          # Required by PyAutoGUI on Windows

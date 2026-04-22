@@ -1,11 +1,10 @@
 """
-CameraThread — Webcam → MediaPipe → Classify → GestureQueue.
+CameraThread — Phase 3
 
-Three-fingers toggle fix:
-  - When keyboard is OPEN, we still run gesture classification on one hand
-  - If three_fingers is detected → fire show_keyboard (closes keyboard)
-  - All other gestures while keyboard is open are ignored (no accidental clicks)
-  - Two-hand hover/pinch tracking still works on the other hand simultaneously
+Added:
+  - Air drawing detection in gesture mode
+  - Passes air_letter events through GestureQueue when stroke recognised
+  - Context-aware mode indicator in debug overlay
 """
 
 import threading
@@ -17,6 +16,7 @@ from typing import Optional, Tuple, Callable
 from core.gesture_queue import GestureQueue, GestureEvent
 from gestures.classifier import GestureClassifier, CURSOR_MOVE, UNKNOWN
 from gestures.landmark_utils import LandmarkUtils
+from gestures.air_drawing import AirDrawManager
 from config.settings import Settings
 
 KEYBOARD_TOGGLE_GESTURE = "three_fingers"
@@ -46,10 +46,15 @@ class CameraThread(threading.Thread):
 
         self.classifier = GestureClassifier(settings)
 
+        # Air drawing manager — fires letter events through gesture queue
+        self._air_draw = AirDrawManager(
+            settings,
+            on_letter_fn=self._on_air_letter,
+        )
+
         import pyautogui
         self.screen_w, self.screen_h = pyautogui.size()
 
-        # Gesture debounce (used in both modes)
         self._pending_gesture: str = ""
         self._pending_frames:  int = 0
         self._last_fired:      str = ""
@@ -65,16 +70,27 @@ class CameraThread(threading.Thread):
         with self._pause_lock:
             self._paused = True
         self.gesture_queue.unlock_cursor()
-        print("[CameraThread] Paused — camera released.")
+        print("[CameraThread] Paused.")
 
     def resume(self):
         with self._pause_lock:
             self._paused = False
+        # Reload classifier model in case it was retrained while paused
+        self.classifier.reload()
         print("[CameraThread] Resumed.")
 
     def is_paused(self) -> bool:
         with self._pause_lock:
             return self._paused
+
+    # ── Air drawing callback ──────────────────────────────────────────────
+
+    def _on_air_letter(self, letter: str, confidence: float):
+        """Called by AirDrawManager when a stroke is recognised."""
+        self.gesture_queue.put_action(GestureEvent(
+            name=f"air_letter:{letter}",
+            confidence=confidence,
+        ))
 
     # ── Main loop ─────────────────────────────────────────────────────────
 
@@ -96,7 +112,7 @@ class CameraThread(threading.Thread):
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
                 cap.set(cv2.CAP_PROP_FPS, 30)
                 if not cap.isOpened():
-                    print(f"[CameraThread] ERROR: Cannot open camera {self.settings.camera_index}")
+                    print(f"[CameraThread] ERROR: Cannot open camera")
                     time.sleep(1)
                     cap = None
                     continue
@@ -136,12 +152,6 @@ class CameraThread(threading.Thread):
     # ── Keyboard mode ─────────────────────────────────────────────────────
 
     def _process_keyboard_mode(self, results, frame):
-        """
-        Keyboard open — two jobs:
-          1. Classify gestures — ONLY fire three_fingers to close keyboard.
-             All other gestures ignored to prevent accidental clicks.
-          2. Feed both hand positions to the keyboard for hover/pinch typing.
-        """
         left_pos    = None
         right_pos   = None
         left_pinch  = 1.0
@@ -149,30 +159,23 @@ class CameraThread(threading.Thread):
 
         if results.multi_hand_landmarks and results.multi_handedness:
             for hl, hd in zip(results.multi_hand_landmarks, results.multi_handedness):
-                label = hd.classification[0].label  # 'Left' or 'Right' (pre-flip)
-
-                tip = hl.landmark[8]   # index fingertip
-                sx  = int(tip.x * self.screen_w)
-                sy  = int(tip.y * self.screen_h)
+                label = hd.classification[0].label
+                tip   = hl.landmark[8]
+                sx    = int(tip.x * self.screen_w)
+                sy    = int(tip.y * self.screen_h)
 
                 features   = LandmarkUtils.landmarks_to_features(hl)
                 pinch_dist = float(features[-1])
 
-                # ── Classify this hand — only care about toggle gesture ───
                 gesture_name, confidence = self.classifier.predict(features)
                 if gesture_name == KEYBOARD_TOGGLE_GESTURE:
-                    # Debounce the close gesture same as open
                     self._debounce_and_fire(
                         KEYBOARD_TOGGLE_GESTURE, confidence, sx, sy
                     )
                 else:
-                    # Not a toggle gesture — reset debounce so it
-                    # doesn't accumulate across different gestures
                     if self._pending_gesture == KEYBOARD_TOGGLE_GESTURE:
                         self._reset_debounce()
 
-                # ── Hand position for hover detection ─────────────────────
-                # After cv2.flip: MediaPipe 'Left' = user's right hand
                 if label == "Left":
                     right_pos   = (sx, sy)
                     right_pinch = pinch_dist
@@ -180,54 +183,64 @@ class CameraThread(threading.Thread):
                     left_pos   = (sx, sy)
                     left_pinch = pinch_dist
 
-                if self.settings.show_debug_window:
-                    self.mp_draw.draw_landmarks(
-                        frame, hl, self.mp_hands.HAND_CONNECTIONS
-                    )
-                    color = (255, 80, 0) if label == "Left" else (0, 200, 80)
-                    cv2.circle(frame,
-                               (int(tip.x * 640), int(tip.y * 480)),
-                               10, color, -1)
-                    cv2.putText(
-                        frame,
-                        f"{'R' if label=='Left' else 'L'} {gesture_name} p={pinch_dist:.2f}",
-                        (int(tip.x * 640) + 12, int(tip.y * 480)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1,
-                    )
-
         if self._keyboard_update_fn is not None:
             self._keyboard_update_fn(left_pos, right_pos, left_pinch, right_pinch)
 
     # ── Gesture mode ──────────────────────────────────────────────────────
 
     def _process_gesture_mode(self, results, frame):
-        if results.multi_hand_landmarks:
-            hand_landmarks = results.multi_hand_landmarks[0]
-            features  = LandmarkUtils.landmarks_to_features(hand_landmarks)
-            tip       = hand_landmarks.landmark[8]
-            cursor_x, cursor_y = self._map_cursor(tip.x, tip.y)
-            gesture_name, confidence = self.classifier.predict(features)
-
-            if gesture_name in (CURSOR_MOVE, UNKNOWN):
-                self.gesture_queue.unlock_cursor()
-                self.gesture_queue.put_cursor(cursor_x, cursor_y, confidence)
-                self._reset_debounce()
-            else:
-                if self._pending_gesture != gesture_name:
-                    self.gesture_queue.lock_cursor()
-                self._debounce_and_fire(gesture_name, confidence, cursor_x, cursor_y)
-
-            if self.settings.show_debug_window:
-                self.mp_draw.draw_landmarks(
-                    frame, hand_landmarks, self.mp_hands.HAND_CONNECTIONS
-                )
-                label = (f"{gesture_name} {confidence:.2f} "
-                         f"[{self._pending_frames}/{self.settings.hold_frames}]")
-                cv2.putText(frame, label, (10, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 120), 2)
-        else:
+        if not results.multi_hand_landmarks:
             self._reset_debounce()
             self.gesture_queue.unlock_cursor()
+            return
+
+        hand_landmarks = results.multi_hand_landmarks[0]
+        features       = LandmarkUtils.landmarks_to_features(hand_landmarks)
+        tip            = hand_landmarks.landmark[8]
+        cursor_x, cursor_y = self._map_cursor(tip.x, tip.y)
+        gesture_name, confidence = self.classifier.predict(features)
+
+        # ── Air drawing intercept ─────────────────────────────────────────
+        if self.settings.air_drawing_enabled:
+            draw_status = self._air_draw.process(
+                gesture_name, tip.x, tip.y, confidence
+            )
+            if self._air_draw.is_drawing:
+                # Show stroke trail on debug frame
+                if self.settings.show_debug_window:
+                    pts = self._air_draw.get_stroke_pts()
+                    h, w = frame.shape[:2]
+                    for i in range(len(pts) - 1):
+                        p1 = (int(pts[i][0] * w),   int(pts[i][1] * h))
+                        p2 = (int(pts[i+1][0] * w), int(pts[i+1][1] * h))
+                        cv2.line(frame, p1, p2, (0, 200, 255), 2)
+                    cv2.putText(frame, f"✏ Drawing... ({len(pts)} pts)",
+                                (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
+                                0.65, (0, 200, 255), 2)
+                return   # while drawing, skip normal gesture processing
+
+        # ── Normal gesture processing ─────────────────────────────────────
+        if gesture_name in (CURSOR_MOVE, UNKNOWN):
+            self.gesture_queue.unlock_cursor()
+            self.gesture_queue.put_cursor(cursor_x, cursor_y, confidence)
+            # FIX: only reset debounce if we were tracking an action gesture
+            # Don't blindly reset on every cursor frame
+            if self._pending_gesture not in ("", CURSOR_MOVE):
+                self._reset_debounce()
+            self._pending_gesture = CURSOR_MOVE
+        else:
+            if self._pending_gesture != gesture_name:
+                self.gesture_queue.lock_cursor()
+            self._debounce_and_fire(gesture_name, confidence, cursor_x, cursor_y)
+
+        if self.settings.show_debug_window:
+            self.mp_draw.draw_landmarks(
+                frame, hand_landmarks, self.mp_hands.HAND_CONNECTIONS
+            )
+            label = (f"{gesture_name} {confidence:.2f} "
+                     f"[{self._pending_frames}/{self.settings.hold_frames}]")
+            cv2.putText(frame, label, (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 120), 2)
 
     # ── Debounce ──────────────────────────────────────────────────────────
 
@@ -253,7 +266,7 @@ class CameraThread(threading.Thread):
                 print(f"[Camera] Fired: {gesture} ({confidence:.2f})")
 
     def _reset_debounce(self):
-        if self._pending_gesture != "":
+        if self._pending_gesture not in ("", CURSOR_MOVE):
             self.gesture_queue.unlock_cursor()
         self._pending_gesture = ""
         self._pending_frames  = 0

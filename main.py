@@ -1,11 +1,6 @@
 """
-Wavly — AI-Powered Gesture Interface
-Entry point. Starts all threads + system tray + two-hand on-screen keyboard.
-
-How to quit Wavly (no terminal needed):
-  1. Right-click tray icon → Quit Wavly
-  2. Press Ctrl+Shift+Q anywhere
-  3. Settings window → Quit button (bottom left)
+Wavly — Phase 3
+Gesture control + Air Drawing + Context Awareness + Two-hand Keyboard
 """
 
 import sys
@@ -16,6 +11,7 @@ from PyQt6.QtGui import QShortcut, QKeySequence
 from core.camera_thread import CameraThread
 from core.action_thread import ActionThread
 from core.gesture_queue import GestureQueue
+from core.context_manager import ContextManager
 from ui.tray import WavlyTray
 from ui.settings_window import SettingsWindow
 from ui.keyboard import OnScreenKeyboard
@@ -33,6 +29,12 @@ def main():
     settings      = Settings()
     gesture_queue = GestureQueue()
 
+    # ── Phase 3: Context awareness ────────────────────────────────────────
+    context_mgr = ContextManager(poll_interval=settings.context_poll_interval)
+    if settings.context_aware_enabled:
+        context_mgr.start()
+
+    # ── Keyboard ──────────────────────────────────────────────────────────
     keyboard = OnScreenKeyboard()
 
     def toggle_keyboard_safe():
@@ -52,9 +54,11 @@ def main():
     def keyboard_is_visible() -> bool:
         return keyboard.isVisible()
 
+    # ── Threads ───────────────────────────────────────────────────────────
     action_thread = ActionThread(
         gesture_queue, settings,
         keyboard_toggle_fn=toggle_keyboard_safe,
+        context_manager=context_mgr,
     )
     camera_thread = CameraThread(gesture_queue, settings)
     camera_thread.set_keyboard_fns(
@@ -67,9 +71,10 @@ def main():
     camera_thread.start()
     action_thread.start()
 
-    # ── Clean quit function shared by tray, shortcut, settings ───────────
+    # ── Clean quit ────────────────────────────────────────────────────────
     def quit_wavly():
         print("[Wavly] Shutting down...")
+        context_mgr.stop()
         camera_thread.stop()
         action_thread.stop()
         app.quit()
@@ -83,24 +88,23 @@ def main():
         quit_fn=quit_wavly,
     )
 
-    # ── Global quit shortcut: Ctrl+Shift+Q ───────────────────────────────
-    # QShortcut on a hidden widget so it works app-wide even without a
-    # focused window. Qt.ShortcutContext.ApplicationShortcut makes it
-    # fire regardless of which window has focus.
-    _shortcut_widget = keyboard   # any persistent QWidget works as parent
-    shortcut = QShortcut(QKeySequence("Ctrl+Shift+Q"), _shortcut_widget)
+    # ── Global quit shortcut ──────────────────────────────────────────────
+    shortcut = QShortcut(QKeySequence("Ctrl+Shift+Q"), keyboard)
     shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
     shortcut.activated.connect(quit_wavly)
 
-    # Pass quit_fn into SettingsWindow so the button there works too
     SettingsWindow.quit_fn = staticmethod(quit_wavly)
 
-    print("[Wavly] Running.")
-    print("[Wavly] Quit: right-click tray icon → Quit  |  or press Ctrl+Shift+Q")
+    print("[Wavly] Phase 3 running.")
+    print("[Wavly] Gestures: cursor / click / scroll / drag / stop / three_fingers")
+    print("[Wavly] Air draw: train with python gestures/air_draw_trainer.py")
+    print("[Wavly] Context: auto-detects browser / editor / media / presentation")
+    print("[Wavly] Quit: Ctrl+Shift+Q  |  tray → Quit  |  Settings → Quit")
 
     try:
         exit_code = app.exec()
     finally:
+        context_mgr.stop()
         camera_thread.stop()
         action_thread.stop()
         print("[Wavly] Shutdown complete.")
