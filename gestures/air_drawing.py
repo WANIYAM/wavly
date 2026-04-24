@@ -168,53 +168,86 @@ class AirDrawRecognizer:
 
 class AirDrawManager:
     """
-    Manages the full air-drawing lifecycle:
-      - Detects draw-start / draw-end gestures
-      - Buffers stroke
-      - Classifies and fires action
+    Manages the full air-drawing lifecycle.
 
-    Called every frame by CameraThread in gesture mode.
-    on_letter_fn(letter, confidence) is called when a stroke is recognised.
+    CONFLICT FIX:
+      Previously used drag_start (fist) to enter draw mode — this caused
+      every normal drag to accidentally start air drawing.
+
+      New behaviour:
+        - HOLD fist for HOLD_TO_DRAW_SECS (1.5s) → enter draw mode
+        - TAP fist briefly (< 1.5s) → normal drag, air draw ignored
+        - Open palm → commit stroke (if drawing) OR release drag (if dragging)
+
+      This means normal drag still works perfectly.
+      Air draw only activates when you clearly hold the fist still.
     """
 
-    # Gesture that starts drawing
-    START_GESTURE = "drag_start"   # fist = start drawing (already trained ✓)
-    END_GESTURE   = "stop"         # open palm = commit stroke (already trained ✓)
-    # Auto-commit after this many seconds if end gesture not shown
-    TIMEOUT_SECS  = 3.0
-    # Min points required
-    MIN_POINTS    = 12
+    START_GESTURE      = "drag_start"  # fist (held long = draw, tapped = drag)
+    END_GESTURE        = "stop"        # open palm = commit stroke
+    HOLD_TO_DRAW_SECS  = 1.5          # hold fist THIS long to enter draw mode
+    TIMEOUT_SECS       = 4.0          # auto-commit after 4s of drawing
+    MIN_POINTS         = 12
 
     def __init__(self, settings: Settings,
                  on_letter_fn: Optional[Callable] = None):
         self.settings      = settings
         self._recognizer   = AirDrawRecognizer(settings)
-        self._buffer       = StrokeBuffer(max_frames=90)
+        self._buffer       = StrokeBuffer(max_frames=120)
         self._on_letter_fn = on_letter_fn
         self._drawing      = False
+
+        # How long fist has been held (for hold-to-draw detection)
+        self._fist_hold_start: float = 0.0
+        self._fist_holding:    bool  = False
 
     @property
     def is_drawing(self) -> bool:
         return self._drawing
 
+    @property
+    def fist_hold_progress(self) -> float:
+        """0.0 → 1.0 progress toward entering draw mode. For UI feedback."""
+        if not self._fist_holding:
+            return 0.0
+        elapsed = time.time() - self._fist_hold_start
+        return min(elapsed / self.HOLD_TO_DRAW_SECS, 1.0)
+
     def process(self, gesture: str, tip_x: float, tip_y: float,
                 confidence: float) -> Optional[str]:
         """
-        Called every frame.
-        tip_x, tip_y are normalised (0-1) fingertip coordinates.
-        Returns status string for UI overlay, or None.
+        Called every frame from CameraThread.
+        Returns status string for debug overlay, or None.
         """
+        now = time.time()
+
         if not self._drawing:
+            # Track how long fist is being held
             if gesture == self.START_GESTURE and confidence > 0.6:
-                self._buffer.start()
-                self._drawing = True
-                print("[AirDraw] Drawing started")
-                return "drawing"
+                if not self._fist_holding:
+                    self._fist_holding   = True
+                    self._fist_hold_start = now
+
+                held_secs = now - self._fist_hold_start
+                if held_secs >= self.HOLD_TO_DRAW_SECS:
+                    # Fist held long enough — enter draw mode
+                    self._buffer.start()
+                    self._drawing      = True
+                    self._fist_holding = False
+                    print(f"[AirDraw] Draw mode entered (held {held_secs:.1f}s)")
+                    return "draw_start"
+                else:
+                    # Still holding — show progress but don't block drag
+                    return f"holding ({held_secs:.1f}s / {self.HOLD_TO_DRAW_SECS}s)"
+            else:
+                # Fist released before threshold — was a normal drag tap
+                self._fist_holding = False
+                return None
+
         else:
-            # Add point to stroke
+            # Currently drawing — add point
             self._buffer.add(tip_x, tip_y)
 
-            # Check for end conditions
             timed_out  = self._buffer.duration >= self.TIMEOUT_SECS
             end_signal = gesture == self.END_GESTURE and confidence > 0.6
 
@@ -223,17 +256,13 @@ class AirDrawManager:
                 self._drawing = False
                 self._classify(pts)
                 return "done"
-
             elif timed_out:
-                # Timeout but not enough points — discard
                 self._buffer.stop()
                 self._drawing = False
-                print("[AirDraw] Stroke too short — discarded")
+                print("[AirDraw] Timeout — stroke discarded (too short)")
                 return "cancelled"
 
             return f"drawing ({len(self._buffer)} pts)"
-
-        return None
 
     def _classify(self, pts: list):
         result = self._recognizer.predict(pts)

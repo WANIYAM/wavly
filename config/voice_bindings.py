@@ -125,3 +125,4 @@ VOICE_BINDINGS: dict = {
     "mute":         "hotkey:volumemute",
     "خاموش":        "hotkey:volumemute",   # Urdu: silent/mute
 }
+

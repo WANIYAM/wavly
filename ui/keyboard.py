@@ -1,27 +1,18 @@
 """
 OnScreenKeyboard — Two-hand floating keyboard.
 
-HOVER FIX — three root causes fixed:
-
-1. QTimer.singleShot flood: main.py was creating a new QTimer every camera
-   frame (30/sec). Most fired late or out of order. Replaced with a proper
-   Qt slot decorated with @pyqtSlot so the camera thread can invoke it
-   directly and safely via QMetaObject.invokeMethod with QueuedConnection.
-
-2. Wrong coordinate space: tip.x * screen_w mapped the fingertip to where
-   the CURSOR would go (top of screen = top of monitor). But the keyboard
-   sits at the BOTTOM. The finger needs to point at the actual keyboard
-   pixel position. Fixed by passing raw normalised coords (0-1) and letting
-   the keyboard convert them to its own widget space.
-
-3. mapToGlobal timing: buttons sometimes returned wrong global coords before
-   the window had fully rendered. Fixed by caching button rects after the
-   window shows, and refreshing the cache on move/resize.
+All issues fixed:
+  1. FULL WIDTH — keyboard spans entire screen width
+  2. CACHED RECTS — button positions computed once, not every frame
+  3. NO FOCUS STEAL — NoFocus on every button and the window itself
+  4. PYPERCLIP TYPING — clipboard paste handles all unicode/symbols
+  5. PROPER QT SLOT — @pyqtSlot so invokeMethod works correctly
+  6. RECT REFRESH — cache rebuilt after show, move, resize, re-render
 """
 
+import time
 import pyautogui
 import pyperclip
-import time
 
 from PyQt6.QtWidgets import (
     QWidget, QPushButton, QVBoxLayout,
@@ -47,15 +38,17 @@ ROWS_SHIFT = [
     ["SPACE"],
 ]
 
-WIDE_KEYS    = {"⌫":1.5, "⇪":1.5, "↵":1.8, "⇧":2.0, "SPACE":10}
-SPECIAL_KEYS = {"⌫", "⇪", "↵", "⇧", "SPACE"}
+WIDE_KEYS    = {"⌫":1.8,"⇪":1.8,"↵":2.2,"⇧":2.5,"SPACE":14}
+SPECIAL_KEYS = {"⌫","⇪","↵","⇧","SPACE"}
 
 PINCH_THRESHOLD = 0.18
 PINCH_DEBOUNCE  = 6
+KEY_HEIGHT      = 46
+H_PADDING       = 8
 
 
 def _type_char(char: str):
-    """Type via clipboard paste — works for all unicode/symbols."""
+    """Type via clipboard — works for all unicode, symbols, brackets."""
     try:
         prev = pyperclip.paste()
     except Exception:
@@ -79,40 +72,45 @@ class KeyButton(QPushButton):
 
     def __init__(self, label: str, parent=None):
         super().__init__("" if label == "SPACE" else label, parent)
-        self.key_label  = label
-        self._hov_l     = False
-        self._hov_r     = False
+        self.key_label = label
+        self._hov_l    = False
+        self._hov_r    = False
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.setFixedHeight(44)
+        self.setFixedHeight(KEY_HEIGHT)
+        # NoFocus: clicking a key never steals focus from the target app
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._style()
+        self._apply_style()
 
     def set_hover(self, left: bool, right: bool):
         if left != self._hov_l or right != self._hov_r:
             self._hov_l = left
             self._hov_r = right
-            self._style()
+            self._apply_style()
 
-    def _style(self):
+    def _apply_style(self):
         special = self.key_label in SPECIAL_KEYS
         if self._hov_l and self._hov_r:
-            bg, border, fw = "#7c3aed", "1px solid rgba(255,255,255,0.5)", "700"
+            bg, border, fw = "#7c3aed", "1px solid rgba(255,255,255,0.6)", "700"
         elif self._hov_l:
-            bg, border, fw = "#2563eb", "1px solid rgba(255,255,255,0.4)", "600"
+            bg, border, fw = "#2563eb", "1px solid rgba(255,255,255,0.5)", "600"
         elif self._hov_r:
-            bg, border, fw = "#16a34a", "1px solid rgba(255,255,255,0.4)", "600"
+            bg, border, fw = "#16a34a", "1px solid rgba(255,255,255,0.5)", "600"
         elif special:
-            bg, border, fw = "rgba(255,255,255,0.06)", "none", "400"
+            bg, border, fw = "rgba(255,255,255,0.07)", "none", "400"
         else:
             bg, border, fw = "rgba(255,255,255,0.11)", "none", "400"
 
         self.setStyleSheet(f"""
             QPushButton {{
-                background:{bg}; color:rgba(255,255,255,0.92);
-                border:{border}; border-radius:7px;
-                font-size:13px; font-family:'Segoe UI'; font-weight:{fw};
+                background: {bg};
+                color: rgba(255,255,255,0.92);
+                border: {border};
+                border-radius: 6px;
+                font-size: 14px;
+                font-family: 'Segoe UI';
+                font-weight: {fw};
             }}
-            QPushButton:pressed {{ background:rgba(255,255,255,0.30); }}
+            QPushButton:pressed {{ background: rgba(255,255,255,0.30); }}
         """)
 
 
@@ -126,20 +124,14 @@ class OnScreenKeyboard(QWidget):
         self._caps  = False
         self._flat_buttons: list[KeyButton] = []
 
-        # Cached button screen rects — rebuilt after show/resize
+        # Cached button screen rects — rebuilt once, not every frame
         self._btn_rects: list[tuple[QRect, KeyButton]] = []
-        self._rects_dirty = True
+        self._rects_valid = False
 
-        # Pinch state
-        self._lframes = 0;  self._lfired = False
-        self._rframes = 0;  self._rfired = False
-
+        self._lframes = 0; self._lfired = False
+        self._rframes = 0; self._rfired = False
         self._lhov: KeyButton | None = None
         self._rhov: KeyButton | None = None
-
-        # Debug: show fingertip positions as dots
-        self._debug_l: tuple | None = None
-        self._debug_r: tuple | None = None
 
         self._setup_window()
         self._build_ui()
@@ -164,43 +156,55 @@ class OnScreenKeyboard(QWidget):
         self._root.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._root.setStyleSheet("""
             QWidget {
-                background:rgba(18,18,20,240);
-                border-radius:14px;
-                border:1px solid rgba(255,255,255,0.08);
+                background: rgba(15, 15, 18, 245);
+                border-radius: 10px;
+                border: 1px solid rgba(255,255,255,0.07);
             }
         """)
         outer.addWidget(self._root)
 
         vbox = QVBoxLayout(self._root)
-        vbox.setContentsMargins(12, 10, 12, 12)
-        vbox.setSpacing(6)
+        vbox.setContentsMargins(H_PADDING, 8, H_PADDING, 10)
+        vbox.setSpacing(5)
 
         # Title bar
         tr = QHBoxLayout()
+        tr.setSpacing(10)
+
         for color, text in [("#3b82f6","● Left hand"), ("#22c55e","● Right hand")]:
             l = QLabel(text)
-            l.setStyleSheet(f"color:{color};font-size:11px;background:transparent;border:none;")
+            l.setStyleSheet(
+                f"color:{color};font-size:11px;background:transparent;border:none;"
+            )
             tr.addWidget(l)
+
         tr.addStretch()
-        hint = QLabel("⌨️  Hover finger over key, then pinch  |  or click with mouse")
-        hint.setStyleSheet("color:rgba(255,255,255,0.35);font-size:10px;background:transparent;border:none;")
+
+        hint = QLabel("hover finger over key  •  pinch to press  •  or click with mouse")
+        hint.setStyleSheet(
+            "color:rgba(255,255,255,0.28);font-size:10px;"
+            "background:transparent;border:none;"
+        )
         tr.addWidget(hint)
         tr.addStretch()
 
         close_btn = QPushButton("✕")
-        close_btn.setFixedSize(24, 24)
+        close_btn.setFixedSize(22, 22)
         close_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         close_btn.setStyleSheet("""
-            QPushButton{background:rgba(255,255,255,0.08);color:rgba(255,255,255,0.5);
-                        border:none;border-radius:12px;font-size:11px;}
-            QPushButton:hover{background:#e5534b;color:white;}
+            QPushButton {
+                background:rgba(255,255,255,0.07);
+                color:rgba(255,255,255,0.45);
+                border:none; border-radius:11px; font-size:11px;
+            }
+            QPushButton:hover { background:#e5534b; color:white; }
         """)
         close_btn.clicked.connect(self.hide_keyboard)
         tr.addWidget(close_btn)
         vbox.addLayout(tr)
 
         self._key_vbox = QVBoxLayout()
-        self._key_vbox.setSpacing(5)
+        self._key_vbox.setSpacing(4)
         vbox.addLayout(self._key_vbox)
 
         self._render_keys()
@@ -217,12 +221,12 @@ class OnScreenKeyboard(QWidget):
         self._flat_buttons.clear()
         self._lhov = None
         self._rhov = None
-        self._rects_dirty = True
+        self._rects_valid = False
 
         rows = ROWS_SHIFT if (self._shift or self._caps) else ROWS_NORMAL
         for row_keys in rows:
             rl = QHBoxLayout()
-            rl.setSpacing(5)
+            rl.setSpacing(4)
             for key in row_keys:
                 btn = KeyButton(key)
                 btn.clicked.connect(lambda chk=False, k=key: self._on_key(k))
@@ -230,54 +234,43 @@ class OnScreenKeyboard(QWidget):
                 self._flat_buttons.append(btn)
             self._key_vbox.addLayout(rl)
 
-        # Rebuild rect cache after layout settles
-        QTimer.singleShot(150, self._rebuild_rects)
+        QTimer.singleShot(120, self._rebuild_rects)
 
     def _rebuild_rects(self):
-        """Cache global screen rects of every button for fast hit-testing."""
-        self._btn_rects = []
+        """Cache global screen rect of every button for O(1) hit testing."""
+        self._btn_rects.clear()
         for btn in self._flat_buttons:
-            if not btn.isVisible():
-                continue
-            tl = btn.mapToGlobal(QPoint(0, 0))
-            self._btn_rects.append((QRect(tl, btn.size()), btn))
-        self._rects_dirty = False
+            if btn.isVisible():
+                tl = btn.mapToGlobal(QPoint(0, 0))
+                self._btn_rects.append((QRect(tl, btn.size()), btn))
+        self._rects_valid = True
 
     def showEvent(self, event):
         super().showEvent(event)
-        # Rebuild rects after window is actually visible and positioned
-        QTimer.singleShot(200, self._rebuild_rects)
+        QTimer.singleShot(150, self._rebuild_rects)
 
     def moveEvent(self, event):
         super().moveEvent(event)
-        self._rects_dirty = True
+        self._rects_valid = False
         QTimer.singleShot(50, self._rebuild_rects)
 
-    # ── Thread-safe slot called from camera thread ────────────────────────
-    # Using @pyqtSlot + direct call via invokeMethod — no QTimer flood
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._rects_valid = False
+        QTimer.singleShot(50, self._rebuild_rects)
+
+    # ── Two-hand update ───────────────────────────────────────────────────
 
     @pyqtSlot(object, object, float, float)
-    def update_hands(
-        self,
-        left_screen:  object,   # (screen_x, screen_y) | None
-        right_screen: object,   # (screen_x, screen_y) | None
-        left_pinch:   float,
-        right_pinch:  float,
-    ):
-        """
-        Called every camera frame.
-        Coordinates are already in SCREEN pixels (from camera_thread).
-        """
+    def update_hands(self, left_screen, right_screen, left_pinch, right_pinch):
         if not self.isVisible():
             return
-
-        if self._rects_dirty:
+        if not self._rects_valid:
             self._rebuild_rects()
 
         new_l = self._btn_at(left_screen)
         new_r = self._btn_at(right_screen)
 
-        # Clear stale hovers
         if self._lhov and self._lhov is not new_l:
             self._lhov.set_hover(False, self._lhov._hov_r)
         if self._rhov and self._rhov is not new_r:
@@ -294,10 +287,10 @@ class OnScreenKeyboard(QWidget):
         self._handle_pinch("l", left_pinch,  new_l)
         self._handle_pinch("r", right_pinch, new_r)
 
-    def _btn_at(self, screen_pos) -> KeyButton | None:
-        if screen_pos is None:
+    def _btn_at(self, pos) -> KeyButton | None:
+        if pos is None:
             return None
-        pt = QPoint(int(screen_pos[0]), int(screen_pos[1]))
+        pt = QPoint(int(pos[0]), int(pos[1]))
         for rect, btn in self._btn_rects:
             if rect.contains(pt):
                 return btn
@@ -326,6 +319,8 @@ class OnScreenKeyboard(QWidget):
                 self._rframes = 0
                 self._rfired  = False
 
+    # ── Key press ─────────────────────────────────────────────────────────
+
     def _on_key(self, key: str):
         if key == "⌫":
             pyautogui.press("backspace")
@@ -346,6 +341,8 @@ class OnScreenKeyboard(QWidget):
                 self._shift = False
                 self._render_keys()
 
+    # ── Visibility ────────────────────────────────────────────────────────
+
     def show_keyboard(self):
         self._position_bottom()
         self.show()
@@ -362,10 +359,17 @@ class OnScreenKeyboard(QWidget):
             self.show_keyboard()
 
     def _position_bottom(self):
+        """Span full screen width, sit at the very bottom."""
         screen = QApplication.primaryScreen().geometry()
+        sw, sh = screen.width(), screen.height()
+
+        # Force full width before measuring height
+        self.setMinimumWidth(sw)
         self.adjustSize()
-        w = min(self.sizeHint().width(), screen.width() - 40)
-        x = (screen.width() - w) // 2
-        y = screen.height() - self.sizeHint().height() - 60
-        self.setGeometry(x, y, w, self.sizeHint().height())
-        self._rects_dirty = True
+
+        h = self.sizeHint().height()
+        # x=0, full width, 4px gap above taskbar
+        self.setGeometry(0, sh - h - 4, sw, h)
+
+        self._rects_valid = False
+        QTimer.singleShot(150, self._rebuild_rects)

@@ -1,6 +1,6 @@
 # Wavly 🖐️ — AI-Powered Gesture Interface
 
-Touchless computer control using real-time hand tracking, gesture recognition, air drawing, and context-aware automation.
+Touchless computer control using real-time hand tracking, gesture recognition, air drawing, context-aware automation, adaptive sensitivity, and voice commands.
 
 ---
 
@@ -8,50 +8,53 @@ Touchless computer control using real-time hand tracking, gesture recognition, a
 
 ```
 wavly/
-├── main.py                        # Entry point — starts all threads + tray + keyboard
+├── main.py                          # Entry point — starts everything
 │
 ├── core/
-│   ├── camera_thread.py           # Thread 1: Webcam → MediaPipe → Gesture Queue
-│   ├── action_thread.py           # Thread 2: Gesture Queue → PyAutoGUI actions
-│   ├── gesture_queue.py           # Thread-safe event bridge
-│   └── context_manager.py        # Phase 3: Active app detection + gesture overrides
+│   ├── camera_thread.py             # Webcam → MediaPipe → Gesture Queue
+│   ├── action_thread.py             # Gesture Queue → PyAutoGUI actions
+│   ├── gesture_queue.py             # Thread-safe event bridge
+│   ├── adaptive_engine.py           # Phase 4: Learns your hand over time
+│   ├── voice_thread.py              # Phase 4: Wake word + speech recognition
+│   └── context_manager.py           # Phase 3: Active app detection
 │
 ├── gestures/
-│   ├── classifier.py              # ML + rule-based gesture classifier
-│   ├── landmark_utils.py          # Feature engineering from MediaPipe landmarks
-│   ├── trainer.py                 # Gesture trainer (cursor/click/scroll etc.)
-│   ├── air_drawing.py             # Phase 3: Stroke buffer + letter recogniser
-│   └── air_draw_trainer.py        # Phase 3: Records letter strokes, trains SVM
+│   ├── classifier.py                # ML + rule-based gesture classifier
+│   ├── landmark_utils.py            # Feature engineering from landmarks
+│   ├── trainer.py                   # Records + trains gesture model
+│   ├── air_drawing.py               # Phase 3: Stroke buffer + recogniser
+│   └── air_draw_trainer.py          # Phase 3: Records letter strokes
 │
 ├── ui/
-│   ├── tray.py                    # System tray icon — main user entry point
-│   ├── settings_window.py         # GUI settings panel (no coding needed)
-│   ├── keyboard.py                # Two-hand floating on-screen keyboard
-│   └── overlay.py                 # Optional transparent HUD overlay
+│   ├── tray.py                      # System tray icon (main user entry point)
+│   ├── settings_window.py           # GUI settings — Gestures / Sensitivity / Adaptive / Voice
+│   ├── keyboard.py                  # Two-hand floating on-screen keyboard
+│   ├── adaptive_panel.py            # Phase 4: Learning stats + reset
+│   ├── voice_panel.py               # Phase 4: Voice command log
+│   └── overlay.py                   # Optional transparent HUD
 │
 ├── config/
-│   ├── settings.py                # All tuneable parameters
-│   ├── gesture_bindings.py        # Gesture → action mappings (managed by UI)
-│   └── air_draw_bindings.py       # Phase 3: Letter → shortcut mappings
+│   ├── settings.py                  # All tuneable parameters
+│   ├── gesture_bindings.py          # Gesture → action mappings
+│   ├── air_draw_bindings.py         # Phase 3: Letter → shortcut mappings
+│   └── voice_bindings.py            # Phase 4: Spoken phrase → action mappings
 │
-├── models/
-│   ├── gesture_model.pkl          # Trained gesture model (from trainer.py)
-│   └── air_draw_model.pkl         # Trained air draw model (from air_draw_trainer.py)
-│
-└── requirements.txt
+└── models/
+    ├── gesture_model.pkl            # Trained gesture model
+    ├── air_draw_model.pkl           # Trained air draw model
+    └── user_profile.json            # Phase 4: Adaptive learning profile
 ```
 
 ---
 
 ## Setup
 
-### 1. Requirements
-
-- Python **3.11** (3.12 is NOT supported — no MediaPipe wheel)
+### Requirements
+- Python **3.11** — 3.12 not supported (no MediaPipe wheel)
+- Windows 10/11
 - A webcam
-- Windows 10/11 (Linux supported with minor changes)
 
-### 2. Create virtual environment
+### 1. Create virtual environment
 
 ```powershell
 cd D:\wavly
@@ -59,7 +62,7 @@ python -m venv .venv
 .venv\Scripts\activate
 ```
 
-### 3. Install dependencies (order matters)
+### 2. Install dependencies (order matters)
 
 ```powershell
 pip install --upgrade pip setuptools wheel
@@ -67,10 +70,15 @@ pip install protobuf==3.20.3
 pip install numpy==1.26.4
 pip install mediapipe==0.10.14
 pip install opencv-python==4.10.0.84 pyautogui==0.9.54 PyQt6==6.7.0
-pip install scikit-learn==1.5.1 pillow==10.4.0 pyperclip pywin32 psutil
+pip install scikit-learn==1.5.1 pillow==10.4.0 pyperclip
+pip install pywin32 psutil
+pip install SpeechRecognition pyaudio openwakeword sounddevice
 ```
 
-### 4. Train gestures (required — takes ~5 minutes)
+> Voice dependencies are optional — Wavly works without them.
+> If `pyaudio` fails: `pip install pipwin` then `pipwin install pyaudio`
+
+### 3. Train gestures (required, ~5 minutes)
 
 ```powershell
 python gestures/trainer.py
@@ -80,21 +88,21 @@ Record these 7 gestures when prompted:
 
 | Gesture | How to do it |
 |---------|-------------|
-| `cursor_move` | ☝️ Index finger pointing up, others curled |
+| `cursor_move` | ☝️ Index finger up, others curled |
 | `click` | 🤌 Pinch thumb + index together |
 | `scroll_up` | ✌️ Index + middle up, hand raised HIGH |
 | `scroll_down` | ✌️ Index + middle up, hand held LOW |
 | `drag_start` | ✊ Closed fist |
 | `stop` | 🖐️ Open palm facing camera |
-| `three_fingers` | 🤟 Index + middle + ring up, pinky + thumb curled |
+| `three_fingers` | 🤟 Index + middle + ring up |
 
-### 5. Run Wavly
+### 4. Run Wavly
 
 ```powershell
 python main.py
 ```
 
-A hand icon appears in the system tray (bottom-right taskbar). If hidden, click `^` to reveal it.
+A hand icon appears in the system tray. If hidden, click `^` to reveal it.
 
 ---
 
@@ -102,101 +110,131 @@ A hand icon appears in the system tray (bottom-right taskbar). If hidden, click 
 
 | Gesture | Action |
 |---------|--------|
-| ☝️ Index finger pointing | Move cursor |
+| ☝️ Index finger | Move cursor |
 | 🤌 Thumb + index pinch | Left click |
-| ✌️ Two fingers up, raised | Scroll up |
-| ✌️ Two fingers up, lowered | Scroll down |
-| ✊ Closed fist | Start drag |
+| ✌️ Two fingers raised | Scroll up |
+| ✌️ Two fingers lowered | Scroll down |
+| ✊ Fist (quick tap) | Start drag |
 | 🖐️ Open palm | Stop / release drag |
-| 🤟 Three fingers up | Toggle on-screen keyboard |
+| 🤟 Three fingers | Toggle on-screen keyboard |
 
 ---
 
-## On-Screen Keyboard (Two-Hand Typing)
+## On-Screen Keyboard
 
-Triggered by showing three fingers (🤟). Show three fingers again to close.
+Triggered by showing 🤟 three fingers. Show three fingers again to close.
 
-While the keyboard is open:
-- **Left hand** highlights keys in **blue** (left side: Q W E R T / A S D F G)
-- **Right hand** highlights keys in **green** (right side: Y U I O P / H J K L)
+- **Left hand** highlights keys in blue (Q W E R T side)
+- **Right hand** highlights keys in green (Y U I O P side)
 - **Pinch** with either hand to type the highlighted key
 - Mouse clicking also works on all keys
+- Full screen width, sits at bottom of screen
 
 ---
 
-## Phase 3 — Air Drawing
+## Air Drawing (Phase 3)
 
-Draw letters in the air to trigger keyboard shortcuts. No extra gesture training needed — uses gestures you already recorded.
-
-### Train air drawing (one-time setup)
-
-```powershell
-python gestures/air_draw_trainer.py
-```
-
-Draws 5 letters by default: C, V, X, Z, S. Press Space to start/commit each stroke.
+Draw letters in the air to trigger keyboard shortcuts.
 
 ### How to use
 
 | Step | Action |
 |------|--------|
-| 1 | ✊ Make a **fist** — drawing mode starts |
-| 2 | Move fist to draw a letter shape in the air |
-| 3 | 🖐️ Open **palm** — stroke commits and shortcut fires |
+| 1 | ✊ **Hold fist still for 1.5 seconds** — draw mode activates |
+| 2 | Move fist to trace a letter shape in the air |
+| 3 | 🖐️ Open **palm** — letter is recognised and shortcut fires |
 
-### Default letter bindings
+> Quick fist tap = normal drag (unchanged). Only a 1.5s hold enters draw mode.
 
-| Draw | Shortcut | Action |
-|------|----------|--------|
-| C | Ctrl+C | Copy |
-| V | Ctrl+V | Paste |
-| X | Ctrl+X | Cut |
-| Z | Ctrl+Z | Undo |
-| S | Ctrl+S | Save |
-| A | Ctrl+A | Select All |
-| F | Ctrl+F | Find |
-| T | Ctrl+T | New Tab |
-| W | Ctrl+W | Close Tab |
-| N | Ctrl+N | New Window |
-| O | Ctrl+O | Open File |
-| R | Ctrl+R | Refresh |
-| P | Ctrl+P | Print |
-| M | Win+M | Minimise all |
-| E | Win+E | File Explorer |
+### Train air drawing (one-time)
 
-To change any binding, edit `config/air_draw_bindings.py` — changes apply instantly without restart.
+```powershell
+python gestures/air_draw_trainer.py
+```
+
+Press **Space** to start a stroke, draw the letter, press **Space** to commit.
+
+### Letter → shortcut bindings
+
+| Draw | Action | Draw | Action |
+|------|--------|------|--------|
+| C | Copy (Ctrl+C) | N | New window (Ctrl+N) |
+| V | Paste (Ctrl+V) | O | Open file (Ctrl+O) |
+| X | Cut (Ctrl+X) | R | Refresh (Ctrl+R) |
+| Z | Undo (Ctrl+Z) | P | Print (Ctrl+P) |
+| S | Save (Ctrl+S) | T | New tab (Ctrl+T) |
+| A | Select all (Ctrl+A) | W | Close tab (Ctrl+W) |
+| F | Find (Ctrl+F) | M | Minimise all (Win+M) |
+|   |                | E | File Explorer (Win+E) |
+
+Edit `config/air_draw_bindings.py` to change any binding — changes apply instantly.
 
 ---
 
-## Phase 3 — Context Awareness
+## Voice Commands (Phase 4)
 
-Wavly automatically detects your active application and adjusts gesture behavior:
+Say **"Hey Wavly"** then speak your command. Supports English and Urdu.
 
-| App | Gesture override |
-|-----|-----------------|
+### Examples
+
+| Say (English) | Say (Urdu) | Action |
+|--------------|------------|--------|
+| "copy" | "کاپی" | Ctrl+C |
+| "paste" | "پیسٹ" | Ctrl+V |
+| "undo" | "واپس" | Ctrl+Z |
+| "save" | "محفوظ کرو" | Ctrl+S |
+| "scroll up" | "اوپر" | Scroll up |
+| "new tab" | "نئی ٹیب" | Ctrl+T |
+| "close" | "بند کرو" | Ctrl+W |
+| "screenshot" | "اسکرین شاٹ" | Win+Shift+S |
+
+Edit `config/voice_bindings.py` to add or change commands.
+
+---
+
+## Context Awareness (Phase 3)
+
+Wavly automatically detects the active app and adjusts gesture behaviour:
+
+| App | Changed behaviour |
+|-----|------------------|
 | 🎵 Spotify / VLC | Fist = play/pause, Scroll = volume |
 | 📊 PowerPoint | Click = next slide, Fist = previous, Palm = exit |
 | 💻 VS Code | Fist = undo (Ctrl+Z) |
-| 🌐 Browser | Normal scroll behavior |
+| 🌐 Browser | Normal scroll |
 
-Context switching is silent and automatic — no configuration needed. To customise, edit `core/context_manager.py` → `CONTEXT_PROFILES`.
+Switching is automatic — no configuration needed. Customise in `core/context_manager.py` → `CONTEXT_PROFILES`.
 
 ---
 
-## Adding Custom Gestures (No Coding)
+## Adaptive Sensitivity (Phase 4)
+
+Wavly silently watches your gestures and auto-tunes sensitivity over time:
+
+- **High misfire rate** on a gesture → hold threshold increases automatically
+- **Reliable gesture with high confidence** → hold threshold decreases (faster response)
+- **Low confidence consistently** → confidence threshold adjusts down
+
+Learning is saved to `models/user_profile.json` and reloaded on every startup.
+
+View stats and reset in **Settings → Adaptive ✨** tab.
+
+---
+
+## Adding Custom Gestures
 
 1. Open Settings → click **"+ Record gesture"**
 2. Wavly pauses, trainer opens in a terminal
 3. Record the gesture following the prompts
-4. Wavly resumes, new gesture appears in Settings
+4. Wavly resumes, new gesture appears in the list
 5. Pick an action from the dropdown → **Save changes**
 
-### Available action types
+### Action types
 
 | Syntax | Example | Effect |
 |--------|---------|--------|
 | Built-in | `click`, `scroll_up` | Standard actions |
-| `show_keyboard` | — | Toggle on-screen keyboard |
+| `show_keyboard` | — | Toggle keyboard |
 | `hotkey:keys` | `hotkey:ctrl+z` | Keyboard shortcut |
 | `type:text` | `type:Hello!` | Type a string |
 | `run:command` | `run:notepad.exe` | Open an app |
@@ -209,24 +247,25 @@ Edit `config/settings.py`:
 
 | Parameter | Default | Effect |
 |-----------|---------|--------|
-| `hold_frames` | 5 | Frames before gesture fires (lower = faster) |
+| `hold_frames` | 3 | Frames before gesture fires (lower = faster) |
+| `action_cooldown_frames` | 6 | Frames between gesture fires (prevents double-fire) |
 | `cursor_smoothing` | 0.35 | 0.1=smooth/laggy, 1.0=raw/fast |
-| `scroll_speed` | 3 | Lines scrolled per gesture |
-| `ml_confidence_threshold` | 0.55 | Min ML confidence before rule fallback |
-| `show_debug_window` | False | Show OpenCV landmark + gesture preview |
+| `ml_confidence_threshold` | 0.45 | Min ML confidence before rule fallback |
+| `scroll_speed` | 3 | Lines per scroll event |
+| `show_debug_window` | False | OpenCV preview with gesture labels |
 | `air_drawing_enabled` | True | Enable/disable air drawing |
 | `context_aware_enabled` | True | Enable/disable context switching |
+| `adaptive_enabled` | True | Enable/disable adaptive learning |
+| `voice_enabled` | True | Enable/disable voice commands |
 
 ---
 
 ## How to Quit
 
-Three ways — no terminal needed:
-
 | Method | How |
 |--------|-----|
 | Tray icon | Right-click → ✕ Quit Wavly |
-| Settings | Open Settings → Quit Wavly button (bottom left) |
+| Settings | Open Settings → Quit Wavly (bottom left) |
 | Shortcut | `Ctrl+Shift+Q` from anywhere |
 
 ---
@@ -234,73 +273,81 @@ Three ways — no terminal needed:
 ## Architecture
 
 ```
-┌─────────────┐    ┌──────────────────────────────────────────────────────┐
-│  Webcam     │───▶│  CameraThread                                        │
-└─────────────┘    │  OpenCV → MediaPipe (1 or 2 hands)                   │
-                   │  Gesture mode  → classify → debounce → GestureQueue  │
-                   │  Keyboard mode → 2-hand hover + pinch → keyboard     │
-                   │  Air draw mode → stroke buffer → letter event        │
-                   └──────────────────────┬───────────────────────────────┘
-                                          │ GestureEvent
-                                          ▼
-                              ┌───────────────────────┐
-                              │      GestureQueue     │
-                              └───────────┬───────────┘
-                                          │
-                   ┌──────────────────────▼──────────────────────────────┐
-                   │  ActionThread                                         │
-                   │  cursor_move   → PyAutoGUI.moveTo (60fps smoothed)   │
-                   │  gesture       → context_manager → resolved action   │
-                   │  air_letter:X  → air_draw_bindings → hotkey/run      │
-                   │  show_keyboard → signals Qt main thread              │
-                   └─────────────────────────────────────────────────────┘
+┌──────────┐   ┌─────────────────────────────────────────────────────────┐
+│  Webcam  │──▶│  CameraThread                                           │
+└──────────┘   │  OpenCV → MediaPipe (1 or 2 hands)                      │
+               │  Gesture mode  → classify → debounce → GestureQueue     │
+               │  Keyboard mode → 2-hand hover + pinch → keyboard        │
+               │  Air draw mode → hold fist 1.5s → stroke → letter       │
+               └─────────────────────────┬───────────────────────────────┘
+                                         │ GestureEvent
+               ┌─────────────────────────▼───────────────────────────────┐
+               │  GestureQueue  (observer pattern)                        │
+               │  → ActionThread    (executes actions)                    │
+               │  → AdaptiveEngine  (silent observer, tunes thresholds)   │
+               └─────────────────────────────────────────────────────────┘
 
-                   ┌─────────────────────────────────────────────────────┐
-                   │  Qt Main Thread                                       │
-                   │  WavlyTray          — system tray icon               │
-                   │  SettingsWindow     — gesture binding GUI            │
-                   │  OnScreenKeyboard   — two-hand floating keyboard     │
-                   └─────────────────────────────────────────────────────┘
+               ┌─────────────────────────────────────────────────────────┐
+               │  VoiceThread (daemon)                                    │
+               │  OpenWakeWord → "Hey Wavly" → Google Speech → command   │
+               │  → GestureQueue (same pipeline as gestures)             │
+               └─────────────────────────────────────────────────────────┘
+
+               ┌─────────────────────────────────────────────────────────┐
+               │  Qt Main Thread                                          │
+               │  WavlyTray          system tray icon                    │
+               │  SettingsWindow     4-tab settings panel                │
+               │  OnScreenKeyboard   full-width two-hand keyboard        │
+               └─────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## Troubleshooting
 
-**No tray icon visible**
-→ Click the `^` arrow in your Windows taskbar to show hidden icons
+**Gestures feel slow**
+→ Lower `hold_frames` to 2 in `config/settings.py`
+→ Lower `ml_confidence_threshold` to 0.40
+→ Retrain — more samples = more consistent predictions
 
-**`ModuleNotFoundError`**
-→ Make sure venv is active: `.venv\Scripts\activate`
-→ Trainer always uses the same Python as Wavly automatically
+**Only cursor moves, other gestures don't fire**
+→ Set `show_debug_window = True` to see what's being detected
+→ Retrain with better lighting (face a window or lamp)
+→ Check `models/gesture_model.pkl` exists
 
-**Gestures feel slow / only cursor works**
-→ Lower `hold_frames` to 4 in Settings → Sensitivity
-→ Retrain with better lighting — face a window or lamp
+**Air drawing triggers during normal drag**
+→ Hold fist for less than 1.5s for a normal drag
+→ Only hold fist still for 1.5s+ when you want to draw
 
-**Air drawing not recognising letters**
-→ Draw bigger and slower
-→ Start and end at consistent positions
-→ Retrain with more samples (increase `SAMPLES_PER_LETTER` in `air_draw_trainer.py`)
+**Voice not working**
+→ Check mic is not muted and is set as default input device
+→ Verify deps: `python -c "import speech_recognition, openwakeword, sounddevice"`
+→ Voice works without internet for matching but needs internet for Google transcription
 
 **Keyboard hover not working**
-→ Enable `show_debug_window = True` to see fingertip dots
+→ Enable `show_debug_window = True` — dots show where fingertips are detected
 → Bring hands closer to camera so fingertips are clearly visible
+→ Toggle keyboard off and on again to rebuild button rect cache
 
-**Camera won't open**
-→ Close Teams, Zoom, or any other app using the camera first
+**Tray icon not visible**
+→ Click `^` in Windows taskbar to show hidden icons
 
-**Low gesture accuracy**
-→ Retrain in the same lighting you use Wavly in
+**`ModuleNotFoundError`**
+→ Activate venv: `.venv\Scripts\activate`
+
+**Low gesture accuracy after training**
+→ Record in the same lighting you use Wavly in
 → Record 300 samples per gesture (default) — don't rush
+→ Retrain including `three_fingers` gesture
 
 ---
 
 ## Roadmap
 
-- [x] Phase 1 — Core gesture pipeline (cursor, click, scroll, drag)
-- [x] Phase 2 — ML gesture classifier + custom gesture training + settings UI
-- [x] Phase 3 — Air drawing (letter → shortcut) + context awareness + two-hand keyboard
-- [ ] Phase 4 — Adaptive sensitivity learning per user
-- [ ] Phase 5 — Voice + gesture hybrid mode
-- [ ] Phase 6 — AR/VR integration
+- [x] Phase 1 — Core gesture pipeline
+- [x] Phase 2 — ML classifier + settings UI + custom gestures
+- [x] Phase 3 — Air drawing + context awareness + two-hand keyboard
+- [x] Phase 4 — Adaptive sensitivity + voice commands (English + Urdu)
+- [ ] Phase 5 — Presentation mode (laser pointer, swipe slides)
+- [ ] Phase 6 — Voice + gesture hybrid commands
+- [ ] Phase 7 — AR/VR integration

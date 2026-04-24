@@ -17,8 +17,8 @@ class Settings:
     min_tracking_confidence: float  = 0.6
 
     # ── Gesture Debounce ─────────────────────────────────────────────────────
-    hold_frames: int            = 5     # Phase 4 adaptive engine tunes this per gesture
-    action_cooldown_frames: int = 8
+    hold_frames: int            = 3     # 3 frames = 100ms, fast but filters noise
+    action_cooldown_frames: int = 6  # 200ms cooldown, prevents double-fire
 
     # ── Cursor ───────────────────────────────────────────────────────────────
     cursor_smoothing: float = 0.35
@@ -30,7 +30,7 @@ class Settings:
     model_path: str = os.path.join(
         os.path.dirname(__file__), "..", "models", "gesture_model.pkl"
     )
-    ml_confidence_threshold: float = 0.55   # Phase 4 adaptive tunes this per gesture
+    ml_confidence_threshold: float = 0.45  # Lowered: fewer UNKNOWN fallbacks
 
     # ── Phase 3: Air Drawing ─────────────────────────────────────────────────
     air_drawing_enabled: bool  = True

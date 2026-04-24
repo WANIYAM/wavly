@@ -214,37 +214,47 @@ class CameraThread(threading.Thread):
         cursor_x, cursor_y       = self._map_cursor(tip.x, tip.y)
         gesture_name, confidence = self.classifier.predict(features)
 
-        # Air drawing intercept
-        if self._air_draw and hasattr(self.settings, 'air_drawing_enabled') \
-                and self.settings.air_drawing_enabled:
-            draw_status = self._air_draw.process(gesture_name, tip.x, tip.y, confidence)
+        # ── Air drawing intercept (FIXED: hold-to-draw, no conflict) ─────
+        if self._air_draw and getattr(self.settings, 'air_drawing_enabled', True):
+            draw_status = self._air_draw.process(
+                gesture_name, tip.x, tip.y, confidence
+            )
+            # Only block normal processing when ACTIVELY drawing a stroke
+            # During the "holding" countdown, normal drag still works
             if self._air_draw.is_drawing:
                 if self.settings.show_debug_window:
                     pts = self._air_draw.get_stroke_pts()
                     h, w = frame.shape[:2]
                     for i in range(len(pts) - 1):
-                        p1 = (int(pts[i][0]*w),   int(pts[i][1]*h))
+                        p1 = (int(pts[i][0]*w), int(pts[i][1]*h))
                         p2 = (int(pts[i+1][0]*w), int(pts[i+1][1]*h))
                         cv2.line(frame, p1, p2, (0, 200, 255), 2)
-                    cv2.putText(frame, f"Drawing... ({len(pts)} pts)",
+                    cv2.putText(frame, f"Drawing... {len(pts)} pts",
                                 (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
                                 0.65, (0, 200, 255), 2)
-                return
+                return  # skip normal gesture while stroke active
 
-        # ── Phase 4: use per-gesture threshold from adaptive engine ───────
+        # ── Per-gesture confidence threshold from adaptive engine ─────────
         adapted_threshold = self._conf_threshold(gesture_name)
         if confidence < adapted_threshold and gesture_name not in (CURSOR_MOVE, UNKNOWN):
             gesture_name = UNKNOWN
 
+        # ── Gesture routing ───────────────────────────────────────────────
         if gesture_name in (CURSOR_MOVE, UNKNOWN):
-            self.gesture_queue.unlock_cursor()
-            self.gesture_queue.put_cursor(cursor_x, cursor_y, confidence)
             if self._pending_gesture not in ("", CURSOR_MOVE):
                 self._reset_debounce()
             self._pending_gesture = CURSOR_MOVE
+            self.gesture_queue.unlock_cursor()
+            self.gesture_queue.put_cursor(cursor_x, cursor_y, confidence)
+
         else:
+            # Action gesture — lock cursor on first frame of new gesture
             if self._pending_gesture != gesture_name:
                 self.gesture_queue.lock_cursor()
+                self._pending_gesture = gesture_name
+                self._pending_frames  = 0   # debounce will increment to 1
+                self._last_fired      = ""
+            # Call debounce every frame including the first
             self._debounce_and_fire(gesture_name, confidence, cursor_x, cursor_y)
 
         if self.settings.show_debug_window:
@@ -261,18 +271,16 @@ class CameraThread(threading.Thread):
     # ── Debounce — uses per-gesture hold_frames from adaptive engine ──────
 
     def _debounce_and_fire(self, gesture: str, confidence: float, cx: int, cy: int):
+        """
+        Increments frame counter and fires when hold threshold reached.
+        Called every frame the gesture is detected, including the first.
+        Cooldown is NOT reset when a new gesture starts — only after fire.
+        """
         if self._cooldown_frames > 0:
             self._cooldown_frames -= 1
             return
 
-        if gesture == self._pending_gesture:
-            self._pending_frames += 1
-        else:
-            self._pending_gesture = gesture
-            self._pending_frames  = 1
-            self._last_fired      = ""
-
-        # ── Phase 4: per-gesture hold threshold ───────────────────────────
+        self._pending_frames += 1
         hold_needed = self._hold_frames(gesture)
 
         if self._pending_frames >= hold_needed:
@@ -284,6 +292,8 @@ class CameraThread(threading.Thread):
                     name=gesture, confidence=confidence,
                     cursor_x=cx, cursor_y=cy,
                 ))
+                print(f"[Camera] Fired: {gesture} ({confidence:.2f}) "
+                      f"hold={hold_needed}")
                 print(f"[Camera] Fired: {gesture} ({confidence:.2f}) "
                       f"hold={hold_needed}")
 
