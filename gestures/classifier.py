@@ -68,20 +68,21 @@ class GestureClassifier:
             proba      = self.ml_model.predict_proba([features])[0]
             best_idx   = int(np.argmax(proba))
             confidence = float(proba[best_idx])
-            gesture    = self.label_encoder.inverse_transform([best_idx])[0]
+            gesture    = str(self.label_encoder.inverse_transform([best_idx])[0])
 
             if confidence >= self.settings.ml_confidence_threshold:
-                return gesture, confidence
+                return gesture, float(confidence)
 
             # Below threshold — blend with rules
             rule_gesture, rule_conf = self._predict_rules(features)
             if rule_conf > confidence:
-                return rule_gesture, rule_conf
-            return gesture, confidence
+                return str(rule_gesture), float(rule_conf)
+            return gesture, float(confidence)
 
         except Exception as e:
             print(f"[Classifier] ML error: {e}")
-            return self._predict_rules(features)
+            g, c = self._predict_rules(features)
+            return str(g), float(c)
 
     def _predict_rules(self, features: np.ndarray) -> Tuple[str, float]:
         """
@@ -103,7 +104,7 @@ class GestureClassifier:
 
         # Protect against degenerate baseline
         if baseline < 1e-4:
-            return UNKNOWN, 0.30
+            return str(UNKNOWN), 0.30
 
         idx_up = i_ext  > baseline * 1.5   # tightened from 1.4
         mid_up = m_ext  > baseline * 1.5
@@ -116,15 +117,15 @@ class GestureClassifier:
 
         # STOP — all 5 fingers clearly extended
         if all_up and thb_up:
-            return STOP, 0.88
+            return str(STOP), 0.88
 
         # DRAG — clear fist
         if all_dn and th_ext < baseline * 0.8:
-            return DRAG_START, 0.85
+            return str(DRAG_START), 0.85
 
         # CLICK — tight pinch, middle finger down
         if pinch < 0.18 and not mid_up:
-            return CLICK, 0.82
+            return str(CLICK), 0.82
 
         # SCROLL — index + middle clearly up, ring + pinky clearly down
         if (idx_up and mid_up
@@ -132,16 +133,16 @@ class GestureClassifier:
                 and p_ext < baseline * 0.95):
             index_mcp_angle = features[0]
             if index_mcp_angle < 0.4:
-                return SCROLL_UP, 0.78
+                return str(SCROLL_UP), 0.78
             else:
-                return SCROLL_DOWN, 0.78
+                return str(SCROLL_DOWN), 0.78
 
         # CURSOR MOVE — index clearly up, middle clearly down
         # Tighter: require middle to be well below threshold
         if idx_up and m_ext < baseline * 0.9:
-            return CURSOR_MOVE, 0.80
+            return str(CURSOR_MOVE), 0.80
 
         # Anything ambiguous → UNKNOWN (not cursor_move!)
         # This is the key fix — UNKNOWN triggers _reset_debounce only
         # if we were tracking a non-cursor gesture, not every frame.
-        return UNKNOWN, 0.35
+        return str(UNKNOWN), 0.35

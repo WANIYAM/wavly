@@ -243,6 +243,14 @@ class SettingsWindow(QWidget):
         except Exception as e:
             print(f"[Settings] Voice tab unavailable: {e}")
 
+        # Phase 4 Step 10 — Activity / Feedback tab
+        try:
+            from ui.feedback_panel import FeedbackPanel
+            self._feedback_panel = FeedbackPanel()
+            self.tabs.addTab(self._feedback_panel, "Activity 📜")
+        except Exception as e:
+            print(f"[Settings] Activity tab unavailable: {e}")
+
         root.addWidget(self.tabs)
 
         footer = QWidget()

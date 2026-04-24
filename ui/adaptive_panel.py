@@ -146,47 +146,75 @@ class AdaptivePanel(QWidget):
             }
         """)
         hl = QHBoxLayout(row)
-        hl.setContentsMargins(12, 8, 12, 8)
-        hl.setSpacing(12)
+        hl.setContentsMargins(12, 10, 12, 10)
+        hl.setSpacing(14)
 
         # Gesture name
         name_lbl = QLabel(gesture.replace("_", " ").title())
-        name_lbl.setFixedWidth(120)
-        name_lbl.setFont(QFont("Segoe UI", 10))
+        name_lbl.setFixedWidth(110)
+        name_lbl.setFont(QFont("Segoe UI", 10, QFont.Weight.Medium))
 
-        # Fire count
-        fires_lbl = QLabel(f"🔥 {info['fires']} fires")
+        # Fire count with health indicator
+        fires = info['fires']
+        fires_indicator = "●" if fires >= 10 else "○"
+        fires_lbl = QLabel(f"{fires_indicator} {fires} fires")
         fires_lbl.setStyleSheet("color:#555; font-size:11px;")
-        fires_lbl.setFixedWidth(80)
+        fires_lbl.setFixedWidth(75)
 
-        # Misfire rate — colour coded
+        # Misfire rate — colour coded with visual indicator
         mr = info["misfire_rate"]
-        mr_color = "#22c55e" if mr < 10 else "#f59e0b" if mr < 25 else "#e5534b"
-        mr_lbl = QLabel(f"⚡ {mr:.1f}% misfire")
-        mr_lbl.setStyleSheet(f"color:{mr_color}; font-size:11px;")
-        mr_lbl.setFixedWidth(110)
+        if mr < 10:
+            mr_color = "#22c55e"
+            mr_icon = "✓"
+        elif mr < 25:
+            mr_color = "#f59e0b"
+            mr_icon = "⚠"
+        else:
+            mr_color = "#e5534b"
+            mr_icon = "✗"
+        
+        mr_lbl = QLabel(f"{mr_icon} {mr:.1f}% misfire")
+        mr_lbl.setStyleSheet(f"color:{mr_color}; font-weight:600; font-size:11px;")
+        mr_lbl.setFixedWidth(100)
 
-        # Adapted values
+        # Mean confidence level
+        conf = info['mean_conf']
+        if conf >= 75:
+            conf_color = "#22c55e"
+        elif conf >= 60:
+            conf_color = "#f59e0b"
+        else:
+            conf_color = "#94a3b8"
+        
+        conf_lbl = QLabel(f"{conf:.0f}% conf")
+        conf_lbl.setStyleSheet(f"color:{conf_color}; font-size:11px;")
+        conf_lbl.setFixedWidth(70)
+
+        # Adapted values with icons
         hold      = info["hold_frames"]
         threshold = info["threshold"]
         adapted_parts = []
+        
         if hold is not None:
-            adapted_parts.append(f"hold={hold}")
+            adapted_parts.append(f"⏱{hold}")
         if threshold is not None:
-            adapted_parts.append(f"conf={threshold:.2f}")
-        adapted_str = "  ".join(adapted_parts) if adapted_parts else "default"
-        adapted_lbl = QLabel(f"⚙ {adapted_str}")
-        adapted_lbl.setStyleSheet("color:#3b82f6; font-size:11px;")
-
-        # Confidence badge
-        conf_lbl = QLabel(f"{info['mean_conf']:.0f}% conf")
-        conf_lbl.setStyleSheet("color:#888; font-size:10px;")
+            adapted_parts.append(f"📊{threshold:.2f}")
+        
+        if adapted_parts:
+            adapted_str = "  ".join(adapted_parts)
+            adapted_lbl = QLabel(adapted_str)
+            adapted_lbl.setStyleSheet("color:#3b82f6; font-size:10px; font-weight:500;")
+            adapted_lbl.setFixedWidth(120)
+        else:
+            adapted_lbl = QLabel("default params")
+            adapted_lbl.setStyleSheet("color:#9ca3af; font-size:10px;")
+            adapted_lbl.setFixedWidth(120)
 
         hl.addWidget(name_lbl)
         hl.addWidget(fires_lbl)
         hl.addWidget(mr_lbl)
-        hl.addWidget(adapted_lbl, 1)
         hl.addWidget(conf_lbl)
+        hl.addWidget(adapted_lbl, 1)
 
         return row
 

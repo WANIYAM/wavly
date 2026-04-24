@@ -201,9 +201,17 @@ class AirDrawManager:
         self._fist_hold_start: float = 0.0
         self._fist_holding:    bool  = False
 
+        # Competing-gesture persistence tracking (≥3 frames @ >0.85 to cancel)
+        self._compete_gesture: str   = ""
+        self._compete_frames:  int   = 0
+
     @property
     def is_drawing(self) -> bool:
         return self._drawing
+
+    @property
+    def is_holding(self) -> bool:
+        return self._fist_holding
 
     @property
     def fist_hold_progress(self) -> float:
@@ -222,11 +230,17 @@ class AirDrawManager:
         now = time.time()
 
         if not self._drawing:
-            # Track how long fist is being held
+            # Continue or start fist hold
             if gesture == self.START_GESTURE and confidence > 0.6:
                 if not self._fist_holding:
-                    self._fist_holding   = True
+                    self._fist_holding    = True
                     self._fist_hold_start = now
+                    self._compete_frames  = 0
+                    self._compete_gesture = ""
+
+                # Reset competing counter while fist is clearly held
+                self._compete_frames  = 0
+                self._compete_gesture = ""
 
                 held_secs = now - self._fist_hold_start
                 if held_secs >= self.HOLD_TO_DRAW_SECS:
@@ -239,10 +253,34 @@ class AirDrawManager:
                 else:
                     # Still holding — show progress but don't block drag
                     return f"holding ({held_secs:.1f}s / {self.HOLD_TO_DRAW_SECS}s)"
-            else:
-                # Fist released before threshold — was a normal drag tap
-                self._fist_holding = False
-                return None
+
+            # Not a clear fist — check for persistent strong competing gesture
+            if self._fist_holding:
+                if gesture != self.START_GESTURE and confidence > 0.85:
+                    if self._compete_gesture == gesture:
+                        self._compete_frames += 1
+                    else:
+                        self._compete_gesture = gesture
+                        self._compete_frames  = 1
+
+                    if self._compete_frames >= 3:
+                        self._fist_holding    = False
+                        self._fist_hold_start = 0.0
+                        self._compete_frames  = 0
+                        self._compete_gesture = ""
+                        return "cancelled"
+                else:
+                    # Weak or brief signal — reset counter but keep holding
+                    self._compete_frames  = 0
+                    self._compete_gesture = ""
+
+            # Fist released before threshold and not strongly competing
+            if self._fist_holding:
+                self._fist_holding    = False
+                self._fist_hold_start = 0.0
+                self._compete_frames  = 0
+                self._compete_gesture = ""
+            return None
 
         else:
             # Currently drawing — add point

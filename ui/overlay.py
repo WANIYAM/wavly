@@ -31,10 +31,21 @@ class WavlyOverlay(QWidget):
         self._fps_timer = time.time()
         self._active = True
 
+        # Phase 4 Step 10: visual flash state
+        self._flash_gesture: str = ""
+        self._flash_action:  str = ""
+        self._flash_color:   str = "#FFFFFF"
+        self._flash_timer   = QTimer(self)
+        self._flash_timer.setSingleShot(True)
+        self._flash_timer.timeout.connect(self._clear_flash)
+
         self._setup_window()
         self._setup_ui()
         self._setup_tray()
         self._setup_timer()
+
+        # Register as gesture observer for instant fire notifications
+        self.gesture_queue.register_observer(self.on_gesture_detected)
 
     def _setup_window(self):
         """Configure frameless, always-on-top transparent window."""
@@ -99,6 +110,12 @@ class WavlyOverlay(QWidget):
         conf_row.addStretch()
         conf_row.addWidget(self.conf_value_label)
 
+        # Flash feedback label (Phase 4 Step 10)
+        self._flash_label = QLabel("")
+        self._flash_label.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+        self._flash_label.setStyleSheet("color: #00FF88;")
+        self._flash_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
         # Status row
         status_row = QHBoxLayout()
         self.mode_label = QLabel("RULE-BASED")
@@ -114,6 +131,7 @@ class WavlyOverlay(QWidget):
         layout.addLayout(header)
         layout.addWidget(self.gesture_label)
         layout.addLayout(conf_row)
+        layout.addWidget(self._flash_label)
         layout.addLayout(status_row)
 
     def _setup_tray(self):
@@ -138,6 +156,33 @@ class WavlyOverlay(QWidget):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._update_ui)
         self.timer.start(80)
+
+    # ── Phase 4 Step 10: Feedback flash API ─────────────────────────────
+
+    def on_gesture_detected(self, name: str, confidence: float, timestamp: float):
+        """Called by GestureQueue observer when a gesture fires after debounce."""
+        self._flash_gesture = name.upper().replace("_", " ")
+        self._flash_color = self._gesture_color(name)
+        self._flash_action = ""
+        self._flash_label.setText(f"✦ {self._flash_gesture}")
+        self._flash_label.setStyleSheet(f"color: {self._flash_color};")
+        self._flash_timer.start(800)
+        self.update()
+
+    def on_action_executed(self, source: str, gesture: str, action: str, success: bool):
+        """Called when ActionThread finishes executing an action."""
+        action_text = action if success else "✗ FAIL"
+        self._flash_color = "#00FF88" if success else "FF4466"
+        self._flash_label.setText(f"✓ {action_text}")
+        self._flash_label.setStyleSheet(f"color: {self._flash_color};")
+        self._flash_timer.start(1200)
+        self.update()
+
+    def _clear_flash(self):
+        self._flash_gesture = ""
+        self._flash_action = ""
+        self._flash_label.setText("")
+        self.update()
 
     def _update_ui(self):
         event = self.gesture_queue.peek_latest()

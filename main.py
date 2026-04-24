@@ -1,6 +1,6 @@
 """
 Wavly — Phase 4 Complete
-Gesture + Air Drawing + Context + Adaptive Sensitivity + Voice Commands
+Gesture + Air Drawing + Context + Adaptive Sensitivity + Voice Commands + Hybrid
 """
 
 import sys
@@ -13,6 +13,8 @@ from core.action_thread import ActionThread
 from core.gesture_queue import GestureQueue
 from core.adaptive_engine import AdaptiveEngine
 from core.voice_thread import VoiceThread
+from core.command_queue import CommandQueue
+from core.intent_resolver import IntentResolver
 from ui.tray import WavlyTray
 from ui.settings_window import SettingsWindow
 from ui.keyboard import OnScreenKeyboard
@@ -93,6 +95,26 @@ def main():
             elif event == "result":
                 win._voice_panel.on_result(transcript, action)
 
+    # ── Phase 4 Step 10: Feedback callbacks ───────────────────────────────
+    def _update_feedback_panel(event, source=None, gesture=None, action=None, success=None):
+        win = SettingsWindow._current_instance
+        if win and hasattr(win, "_feedback_panel"):
+            if event == "gesture_detected" and gesture is not None:
+                win._feedback_panel.on_gesture_detected(gesture, 1.0)
+            elif event == "action_executed":
+                win._feedback_panel.on_action_executed(
+                    source or "", gesture or "", action or "", bool(success)
+                )
+
+    def on_action_executed_safe(source, gesture, action, success):
+        """Thread-safe proxy: ActionThread → main Qt thread."""
+        QTimer.singleShot(
+            0,
+            lambda: _update_feedback_panel(
+                "action_executed", source, gesture, action, success
+            )
+        )
+
     voice_thread = VoiceThread(
         gesture_queue=gesture_queue,
         on_listening_fn=on_listening_safe,
@@ -105,10 +127,18 @@ def main():
         print("[Wavly] Voice thread active — say 'Hey Wavly' to use voice commands.")
 
     # ── Threads ───────────────────────────────────────────────────────────
+    # ── Phase 4c: Command Queue + Intent Resolver (Hybrid) ────────────────
+    command_queue   = CommandQueue(timeout_secs=2.0)
+    intent_resolver = IntentResolver()
+    print("[Wavly] Hybrid voice+gesture infrastructure ready.")
+
     action_thread = ActionThread(
         gesture_queue, settings,
         keyboard_toggle_fn=toggle_keyboard_safe,
         context_manager=context_mgr,
+        on_action_executed=on_action_executed_safe,
+        command_queue=command_queue,
+        intent_resolver=intent_resolver,
     )
     camera_thread = CameraThread(
         gesture_queue, settings,

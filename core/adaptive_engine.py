@@ -45,13 +45,22 @@ LIMITS = {
 }
 
 # Tune after this many gesture events
+# Rationale: 50 is a good balance. Too low (<20) = noisy data, too many random
+# adaptations. Too high (>200) = slow feedback loop. Users notice changes after
+# ~50 gestures (2-3 minutes of use).
 ADAPT_EVERY = 50
 
 # Rolling window size per gesture
+# Rationale: Keep last 100 confidence scores per gesture. This smooths out
+# single bad frames but reacts quickly to trend changes. ~5 seconds of data
+# at 20 fps.
 WINDOW_SIZE = 100
 
 # Misfire detection: if gesture A fires then gesture B fires within this
 # many seconds, treat A as a possible misfire
+# Rationale: 0.4 seconds = 8 frames @ 20fps. If user corrects within this
+# window, the first gesture was likely noise. Beyond 0.4s is probably a real
+# separate gesture, not a correction.
 REVERSAL_WINDOW_SECS = 0.4
 
 # Profile save path
@@ -110,6 +119,9 @@ class AdaptiveEngine(threading.Thread):
 
         # Total events processed since last adaptation
         self._since_adapt  = 0
+        
+        # Counter for logging
+        self._adapt_cycle_count = 0
 
         # Callbacks for UI notification
         self._on_adapt_callbacks: list = []
@@ -210,6 +222,14 @@ class AdaptiveEngine(threading.Thread):
         """
         Core adaptation — called every ADAPT_EVERY gestures.
         Analyses recent event stream and adjusts per-gesture parameters.
+        
+        This runs every ADAPT_EVERY=50 gesture events and recomputes optimal
+        parameters per gesture based on:
+          - Misfire rate (quick reversals)
+          - Confidence score distribution
+          - Fire count
+        
+        All changes are bounded by LIMITS to prevent runaway tuning.
         """
         with self._lock:
             events         = list(self._event_stream)
@@ -217,19 +237,33 @@ class AdaptiveEngine(threading.Thread):
             self._since_adapt = 0
 
         changes = []
+        
+        print(f"\n[Adaptive] ╭─ Adaptation Cycle #{self._adapt_cycle_count}")
+        print(f"[Adaptive] │  Processing {len(events)} events, {len(stats_snapshot)} gesture types")
 
         # ── Step 1: Detect reversals (misfires) ───────────────────────────
+        print(f"[Adaptive] │  [Step 1] Scanning for misfire reversals...")
+        reversal_count = 0
         for i in range(len(events) - 1):
             a = events[i]
             b = events[i + 1]
             dt = b["ts"] - a["ts"]
             # If two opposite gestures fire very close together,
-            # the first was likely a misfire
+            # the first was likely a misfire.
+            # Logic: User intends gesture A but ML predicts B; then corrects
+            # with a clearer instance of gesture A. The first A was a misfire.
             if dt < REVERSAL_WINDOW_SECS and a["gesture"] != b["gesture"]:
                 if a["gesture"] in stats_snapshot:
                     stats_snapshot[a["gesture"]].mark_misfire()
+                    reversal_count += 1
+        
+        if reversal_count > 0:
+            print(f"[Adaptive] │    Found {reversal_count} reversals (within {REVERSAL_WINDOW_SECS}s)")
 
         # ── Step 2: Per-gesture threshold tuning ──────────────────────────
+        print(f"[Adaptive] │  [Step 2] Tuning per-gesture thresholds...")
+        tune_count = 0
+        
         for name, st in stats_snapshot.items():
             if st.fire_count < 10:
                 continue   # not enough data yet
@@ -237,28 +271,46 @@ class AdaptiveEngine(threading.Thread):
             new_hold      = None
             new_threshold = None
 
-            # High misfire rate → increase hold_frames (require longer hold)
+            # 🔴 High misfire rate → increase hold_frames (require longer hold)
+            # Rationale: If a gesture misfires >20% of the time, the user is
+            # probably showing the hand position too briefly. We need a longer
+            # hold_frames window to reduce false positives.
             if st.misfire_rate > 0.20:
                 current = st.adapted_hold or self.settings.hold_frames
                 new_hold = min(current + 1, LIMITS["hold_frames"][1])
+                print(f"[Adaptive] │    {name}: HIGH misfires ({st.misfire_rate:.1%}) → hold_frames {current}→{new_hold}")
 
-            # Very low misfire rate + high confidence
+            # 🟢 Very low misfire rate + high confidence
             # → can safely decrease hold_frames (more responsive)
+            # Rationale: If misfires are rare (<5%) and confidence is consistently
+            # high (>75%), the gesture is easy to detect. We can lower the hold
+            # threshold for faster response without sacrificing accuracy.
             elif st.misfire_rate < 0.05 and st.mean_confidence > 0.75:
                 current  = st.adapted_hold or self.settings.hold_frames
                 new_hold = max(current - 1, LIMITS["hold_frames"][0])
+                print(f"[Adaptive] │    {name}: LOW misfires ({st.misfire_rate:.1%}), HIGH conf ({st.mean_confidence:.1%}) → hold_frames {current}→{new_hold}")
 
-            # Confidence is consistently low → lower threshold slightly
+            # 🔵 Confidence is consistently low → lower threshold slightly
+            # Rationale: If the gesture fires but always at low confidence
+            # (e.g., 0.50±0.05) with tight clustering, the model is struggling
+            # to recognize this gesture. Lowering the threshold gives it more
+            # room to trigger, but only if variance is low (confident it's
+            # consistently this gesture, not noise).
             if st.mean_confidence < 0.55 and st.stdev_confidence < 0.10:
                 current       = st.adapted_threshold or self.settings.ml_confidence_threshold
                 new_threshold = max(current - 0.02,
                                     LIMITS["ml_confidence_threshold"][0])
+                print(f"[Adaptive] │    {name}: LOW conf ({st.mean_confidence:.2f}±{st.stdev_confidence:.2f}) → threshold {current:.3f}→{new_threshold:.3f}")
 
-            # Confidence is consistently high → can raise threshold
+            # 🟡 Confidence is consistently high → can raise threshold
+            # Rationale: If the gesture is recognized reliably at high
+            # confidence and has low misfire rate, we can be more selective.
+            # Higher threshold means fewer false positives from ambiguous frames.
             elif st.mean_confidence > 0.80 and st.misfire_rate < 0.05:
                 current       = st.adapted_threshold or self.settings.ml_confidence_threshold
                 new_threshold = min(current + 0.02,
                                     LIMITS["ml_confidence_threshold"][1])
+                print(f"[Adaptive] │    {name}: HIGH conf ({st.mean_confidence:.2f}), LOW misfires → threshold {current:.3f}→{new_threshold:.3f}")
 
             # Apply changes
             with self._lock:
@@ -268,20 +320,29 @@ class AdaptiveEngine(threading.Thread):
                         changes.append(
                             f"{name}: hold_frames → {new_hold}"
                         )
+                        tune_count += 1
                     if new_threshold is not None and new_threshold != self._stats[name].adapted_threshold:
                         self._stats[name].adapted_threshold = round(new_threshold, 3)
                         changes.append(
                             f"{name}: threshold → {new_threshold:.3f}"
                         )
+                        tune_count += 1
 
         if changes:
-            print(f"[Adaptive] Adapted: {', '.join(changes)}")
+            self._adapt_cycle_count += 1
+            print(f"[Adaptive] ├─ {tune_count} parameters adapted, {len(changes)} change(s)")
+            for change in changes:
+                print(f"[Adaptive] │  • {change}")
+            print(f"[Adaptive] ╰─ Profile saved")
             self._save_profile()
             for cb in self._on_adapt_callbacks:
                 try:
                     cb(changes)
                 except Exception:
                     pass
+        else:
+            print(f"[Adaptive] ├─ No tuning needed (all gestures optimal)")
+            print(f"[Adaptive] ╰─ End cycle")
 
     # ── Persistence ───────────────────────────────────────────────────────
 

@@ -75,13 +75,17 @@ class CommandResolver:
         bindings = self._load_bindings()
         text     = transcript.strip().lower()
 
-        # Exact match first
-        for phrase, action in bindings.items():
+        # Sort longest phrase first — prevents "open" matching before "open browser"
+        sorted_bindings = sorted(bindings.items(), key=lambda x: len(x[0]), reverse=True)
+
+        # Exact match first (still longest-first order)
+        for phrase, action in sorted_bindings:
             if text == phrase.lower():
                 return action
 
-        # Partial match — transcript contains the phrase
-        for phrase, action in bindings.items():
+        # Partial match — longest phrase wins
+        # e.g. "open browser" matches before "open"
+        for phrase, action in sorted_bindings:
             if phrase.lower() in text:
                 return action
 

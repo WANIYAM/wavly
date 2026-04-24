@@ -90,12 +90,47 @@ class GestureQueue:
     # ── Action channel ────────────────────────────────────────────────────
 
     def put_action(self, event: GestureEvent):
+        CRITICAL_GESTURES = {"stop", "click", "drag_end"}
+
         with self._latest_lock:
             self._latest_event = event
+
         try:
             self._action_queue.put_nowait(event)
         except queue.Full:
-            pass
+            if event.name in CRITICAL_GESTURES:
+                # Drain queue to find a non-critical victim to evict
+                drained = []
+                while not self._action_queue.empty():
+                    try:
+                        drained.append(self._action_queue.get_nowait())
+                    except queue.Empty:
+                        break
+
+                victim_idx = None
+                for i, e in enumerate(drained):
+                    if e.name not in CRITICAL_GESTURES:
+                        victim_idx = i
+                        break
+
+                if victim_idx is not None:
+                    victim = drained.pop(victim_idx)
+                    print(f"[GestureQueue] Evicted '{victim.name}' to make room for critical '{event.name}'")
+                elif drained:
+                    # All events are critical — evict the oldest (FIFO front)
+                    victim = drained.pop(0)
+                    print(f"[GestureQueue] Evicted critical '{victim.name}' to make room for critical '{event.name}'")
+
+                drained.append(event)
+                for e in drained:
+                    try:
+                        self._action_queue.put_nowait(e)
+                    except queue.Full:
+                        break
+            else:
+                # Non-critical event: silently drop as before
+                pass
+
         # Notify observers (adaptive engine, overlay, etc.)
         self._notify_observers(event)
 
