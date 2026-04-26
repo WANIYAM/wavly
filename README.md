@@ -1,6 +1,6 @@
 # Wavly 🖐️ — AI-Powered Gesture Interface
 
-Touchless computer control using real-time hand tracking, gesture recognition, air drawing, context-aware automation, adaptive sensitivity, and voice commands.
+Touchless computer control using real-time hand tracking, gesture recognition, air drawing, context-aware automation, adaptive sensitivity, voice commands, **hybrid voice+gesture commands**, and **presentation mode**.
 
 ---
 
@@ -10,13 +10,16 @@ Touchless computer control using real-time hand tracking, gesture recognition, a
 wavly/
 ├── main.py                          # Entry point — starts everything
 │
-├── core/
+├── core/                            # Runtime engine
 │   ├── camera_thread.py             # Webcam → MediaPipe → Gesture Queue
 │   ├── action_thread.py             # Gesture Queue → PyAutoGUI actions
 │   ├── gesture_queue.py             # Thread-safe event bridge
+│   ├── command_queue.py             # Phase 4: Voice events pending gesture pairing
+│   ├── intent_resolver.py           # Phase 4: Maps voice+gesture → hybrid action
 │   ├── adaptive_engine.py           # Phase 4: Learns your hand over time
 │   ├── voice_thread.py              # Phase 4: Wake word + speech recognition
-│   └── context_manager.py           # Phase 3: Active app detection
+│   ├── context_manager.py           # Phase 3: Active app detection
+│   └── presentation_mode.py         # Phase 5: Laser pointer + slide controls
 │
 ├── gestures/
 │   ├── classifier.py                # ML + rule-based gesture classifier
@@ -31,18 +34,37 @@ wavly/
 │   ├── keyboard.py                  # Two-hand floating on-screen keyboard
 │   ├── adaptive_panel.py            # Phase 4: Learning stats + reset
 │   ├── voice_panel.py               # Phase 4: Voice command log
-│   └── overlay.py                   # Optional transparent HUD
+│   ├── overlay.py                   # Optional transparent HUD
+│   └── laser_pointer.py             # Phase 5: Always-on-top laser dot
 │
 ├── config/
 │   ├── settings.py                  # All tuneable parameters
 │   ├── gesture_bindings.py          # Gesture → action mappings
 │   ├── air_draw_bindings.py         # Phase 3: Letter → shortcut mappings
-│   └── voice_bindings.py            # Phase 4: Spoken phrase → action mappings
+│   ├── voice_bindings.py            # Phase 4: Spoken phrase → action mappings
+│   └── hybrid_bindings.py           # Phase 4: (voice, gesture) → hybrid action mappings
 │
-└── models/
-    ├── gesture_model.pkl            # Trained gesture model
-    ├── air_draw_model.pkl           # Trained air draw model
-    └── user_profile.json            # Phase 4: Adaptive learning profile
+├── models/
+│   ├── gesture_model.pkl            # Trained gesture model
+│   ├── air_draw_model.pkl           # Trained air draw model
+│   └── user_profile.json            # Phase 4: Adaptive learning profile
+│
+├── tests/
+│   ├── test_hybrid.py               # Phase 4: Voice+Gesture unit tests
+│   └── test_adaptive_engine.py      # Phase 4: Adaptive engine unit tests
+│
+├── audits/                          # Technical verification reports
+│   ├── phase1_verification.md
+│   ├── phase2_verification.md
+│   ├── phase3_verification.md
+│   ├── phase4_verification.md
+│   ├── final_diagnostic.md
+│   └── ...
+│
+├── requirements.txt                 # Full dependency list with pinned versions
+├── REVIEW.md                        # Full technical audit & improvement roadmap
+├── TODO.md                          # Current task tracking
+└── PHASE4_DEEP_DIVE.md              # Deep-dive on Phase 4 features
 ```
 
 ---
@@ -62,8 +84,15 @@ python -m venv .venv
 .venv\Scripts\activate
 ```
 
-### 2. Install dependencies (order matters)
+### 2. Install dependencies
 
+**Option A — Using requirements.txt:**
+```powershell
+pip install --upgrade pip setuptools wheel
+pip install -r requirements.txt
+```
+
+**Option B — Manual install (order matters):**
 ```powershell
 pip install --upgrade pip setuptools wheel
 pip install protobuf==3.20.3
@@ -192,6 +221,72 @@ Edit `config/voice_bindings.py` to add or change commands.
 
 ---
 
+## Hybrid Voice + Gesture Commands (Phase 4)
+
+Combine voice and gesture for actions neither can do alone. Say a voice command, then perform a gesture within **2 seconds**.
+
+### How it works
+
+```
+Voice: "open"  →  stored in CommandQueue (waits 2s)
+Gesture: ☝️ point  →  IntentResolver matches ("open", "point")
+Result: "open_at_cursor" action fires
+```
+
+If no matching gesture arrives within 2 seconds, the voice command executes as **voice-only**.
+
+### Hybrid bindings
+
+| Voice | Gesture | Result |
+|-------|---------|--------|
+| "open" | ☝️ Point | Open file/folder at cursor position |
+| "search" | ✊ Air letter | Search for the drawn letter |
+| "scroll up" | ✌️ Scroll up | Scroll up faster |
+| "scroll down" | ✌️ Scroll down | Scroll down faster |
+| "click" | ☝️ Point | Click where pointing (reinforces intent) |
+
+Edit `config/hybrid_bindings.py` to add custom pairings — changes reload dynamically.
+
+### Architecture
+
+- `VoiceThread` → `CommandQueue` (stores pending voice events)
+- `CameraThread` → gesture detected → `ActionThread` checks `CommandQueue`
+- `IntentResolver` matches `(voice_action, gesture_type)` → hybrid action
+- If no match: voice-only fallback executes automatically
+
+---
+
+## Presentation Mode (Phase 5)
+
+A dedicated mode for giving presentations. Activates **automatically** when PowerPoint is in focus, or toggle manually via the tray icon.
+
+### Presentation gestures
+
+| Gesture | Action |
+|---------|--------|
+| ☝️ Index finger move | Laser pointer dot follows fingertip |
+| 👈 Swipe left | Previous slide |
+| 👉 Swipe right | Next slide |
+| 🤌 Click / pinch | Next slide |
+| ✊ Fist | Black screen (B key) |
+| 🖐️ Open palm | Exit slideshow (Escape) |
+| 🤟 Three fingers | Zoom in (Ctrl++) |
+| ✌️ Two fingers | Zoom out (Ctrl+−) |
+
+### Laser pointer
+
+- Small glowing always-on-top red dot
+- Smooth exponential moving average tracking
+- Fades out when hand leaves frame
+- Never steals focus from PowerPoint
+- Color configurable (red/green)
+
+### Swipe detection
+
+Tracks fingertip X movement over 12 frames. If consistent displacement exceeds the threshold, a slide change fires with a 1.2-second cooldown to prevent rapid multi-fire.
+
+---
+
 ## Context Awareness (Phase 3)
 
 Wavly automatically detects the active app and adjusts gesture behaviour:
@@ -199,7 +294,7 @@ Wavly automatically detects the active app and adjusts gesture behaviour:
 | App | Changed behaviour |
 |-----|------------------|
 | 🎵 Spotify / VLC | Fist = play/pause, Scroll = volume |
-| 📊 PowerPoint | Click = next slide, Fist = previous, Palm = exit |
+| 📊 PowerPoint | Auto-activates **Presentation Mode** |
 | 💻 VS Code | Fist = undo (Ctrl+Z) |
 | 🌐 Browser | Normal scroll |
 
@@ -257,6 +352,11 @@ Edit `config/settings.py`:
 | `context_aware_enabled` | True | Enable/disable context switching |
 | `adaptive_enabled` | True | Enable/disable adaptive learning |
 | `voice_enabled` | True | Enable/disable voice commands |
+| `temporal_filter_size` | 5 | Rolling buffer for gesture stability filtering |
+| `temporal_filter_majority` | 3 | Min votes to switch stable output |
+| `skip_frames_when_lagging` | True | Drop frames if inference falls behind |
+| `adaptive_cycle_size` | 50 | Gesture events between adaptation cycles |
+| `context_poll_interval` | 1.0 | Seconds between active window checks |
 
 ---
 
@@ -279,6 +379,7 @@ Edit `config/settings.py`:
                │  Gesture mode  → classify → debounce → GestureQueue     │
                │  Keyboard mode → 2-hand hover + pinch → keyboard        │
                │  Air draw mode → hold fist 1.5s → stroke → letter       │
+               │  Presentation  → swipe detection + laser pointer        │
                └─────────────────────────┬───────────────────────────────┘
                                          │ GestureEvent
                ┌─────────────────────────▼───────────────────────────────┐
@@ -290,7 +391,12 @@ Edit `config/settings.py`:
                ┌─────────────────────────────────────────────────────────┐
                │  VoiceThread (daemon)                                    │
                │  OpenWakeWord → "Hey Wavly" → Google Speech → command   │
-               │  → GestureQueue (same pipeline as gestures)             │
+               │  → CommandQueue → IntentResolver → ActionThread         │
+               └─────────────────────────────────────────────────────────┘
+
+               ┌─────────────────────────────────────────────────────────┐
+               │  PresentationMode (auto-activated)                       │
+               │  LaserPointer + SwipeDetector + slide controls          │
                └─────────────────────────────────────────────────────────┘
 
                ┌─────────────────────────────────────────────────────────┐
@@ -298,8 +404,26 @@ Edit `config/settings.py`:
                │  WavlyTray          system tray icon                    │
                │  SettingsWindow     4-tab settings panel                │
                │  OnScreenKeyboard   full-width two-hand keyboard        │
+               │  LaserPointer       always-on-top dot                   │
                └─────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## Tests
+
+Run the test suite:
+
+```powershell
+python -m unittest discover tests/
+```
+
+### Test coverage
+
+| File | What it tests |
+|------|--------------|
+| `tests/test_hybrid.py` | CommandQueue, IntentResolver, voice-only fallback, thread safety |
+| `tests/test_adaptive_engine.py` | Adaptive threshold tuning, profile save/load |
 
 ---
 
@@ -324,6 +448,16 @@ Edit `config/settings.py`:
 → Verify deps: `python -c "import speech_recognition, openwakeword, sounddevice"`
 → Voice works without internet for matching but needs internet for Google transcription
 
+**Hybrid commands not firing**
+→ Make sure you perform the gesture within 2 seconds of saying the voice command
+→ Check `config/hybrid_bindings.py` for valid pairings
+→ Verify voice command exists in `config/voice_bindings.py`
+
+**Presentation mode not activating**
+→ Manually toggle via tray icon → "Presentation Mode"
+→ Ensure PowerPoint window title contains "PowerPoint"
+→ Laser pointer requires hand to be detected (check debug window)
+
 **Keyboard hover not working**
 → Enable `show_debug_window = True` — dots show where fingertips are detected
 → Bring hands closer to camera so fingertips are clearly visible
@@ -347,7 +481,24 @@ Edit `config/settings.py`:
 - [x] Phase 1 — Core gesture pipeline
 - [x] Phase 2 — ML classifier + settings UI + custom gestures
 - [x] Phase 3 — Air drawing + context awareness + two-hand keyboard
-- [x] Phase 4 — Adaptive sensitivity + voice commands (English + Urdu)
-- [ ] Phase 5 — Presentation mode (laser pointer, swipe slides)
-- [ ] Phase 6 — Voice + gesture hybrid commands
-- [ ] Phase 7 — AR/VR integration
+- [x] Phase 4 — Adaptive sensitivity + voice commands (English + Urdu) + hybrid voice+gesture
+- [x] Phase 5 — Presentation mode (laser pointer, swipe slides, zoom)
+- [ ] Phase 6 — Gesture macros (record sequences like "fist → palm → fist" = custom action)
+- [ ] Phase 7 — Plugin system + headless mode
+- [ ] Phase 8 — AR/VR integration
+
+---
+
+## Additional Documentation
+
+| File | Contents |
+|------|----------|
+| `REVIEW.md` | Full technical audit with critical issues, performance fixes, and AI improvements |
+| `PHASE4_DEEP_DIVE.md` | Detailed design docs for adaptive sensitivity, voice+gesture hybrid, and presentation mode |
+| `TODO.md` | Current task tracking and verification results |
+| `audits/` | Phase-by-phase verification reports and diagnostic logs |
+
+---
+
+*Wavly — Control your computer without touching it.*
+

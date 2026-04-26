@@ -109,15 +109,20 @@ class ContextManager:
     """
     Polls the active window every N seconds and resolves a context profile.
     Thread-safe: poll runs in background, get_context() is instant.
+
+    Phase 5: on_context_change(context_name) callback fires when
+    context switches — used to auto-activate presentation mode.
     """
 
-    def __init__(self, poll_interval: float = 1.0):
+    def __init__(self, poll_interval: float = 1.0,
+                 on_context_change=None):
         self._poll_interval  = poll_interval
         self._current        = DEFAULT_CONTEXT
         self._current_proc   = ""
         self._lock           = threading.Lock()
         self._running        = False
         self._thread: Optional[threading.Thread] = None
+        self._on_context_change = on_context_change   # Phase 5 callback
 
     def start(self):
         if not WIN32_AVAILABLE:
@@ -155,7 +160,14 @@ class ContextManager:
                     with self._lock:
                         self._current = ctx
                     print(f"[Context] Active: {ctx['emoji']} {ctx['name']} ({proc_name})")
-            except Exception as e:
+                    # Phase 5: notify main.py so it can activate/deactivate
+                    # presentation mode automatically
+                    if self._on_context_change:
+                        try:
+                            self._on_context_change(ctx["name"])
+                        except Exception:
+                            pass
+            except Exception:
                 pass
             time.sleep(self._poll_interval)
 

@@ -127,6 +127,7 @@ class VoiceThread(threading.Thread):
 
         self._recognizer   = sr.Recognizer() if SR_AVAILABLE else None
         self._wake_model   = None
+        self._active_wake_word = "alexa"   # updated by _load_wake_model
         self._last_wake    = 0.0   # prevent rapid re-triggers
 
     def set_enabled(self, enabled: bool):
@@ -166,17 +167,29 @@ class VoiceThread(threading.Thread):
     def _load_wake_model(self):
         if not OWW_AVAILABLE:
             return
-        try:
-            # OpenWakeWord downloads model automatically on first run
-            self._wake_model = WakeWordModel(
-                wakeword_models=["hey_jarvis"],   # closest available to "Hey Wavly"
-                inference_framework="onnx",
-            )
-            print("[Voice] Wake word model loaded.")
-        except Exception as e:
-            print(f"[Voice] Wake word model failed: {e}")
-            print("[Voice] Using push-to-listen fallback.")
-            self._wake_model = None
+        # OpenWakeWord ships with these free models out of the box:
+        # "alexa", "hey_mycroft", "hey_jarvis", "timer", "weather"
+        # There is no "hey_wavly" model — it would need custom training.
+        # "alexa" is the most accurate and responsive of the available models.
+        # Users say "Alexa" instead of "Hey Wavly" to trigger voice commands.
+        # To train a custom wake word see: https://github.com/dscripka/openWakeWord
+        WAKE_MODELS_TO_TRY = ["alexa", "hey_mycroft", "hey_jarvis"]
+        for model_name in WAKE_MODELS_TO_TRY:
+            try:
+                self._wake_model = WakeWordModel(
+                    wakeword_models=[model_name],
+                    inference_framework="onnx",
+                )
+                self._active_wake_word = model_name
+                print(f"[Voice] Wake word model loaded: '{model_name}'")
+                print(f"[Voice] Say '{model_name.replace('_', ' ').title()}' to activate voice commands.")
+                return
+            except Exception as e:
+                print(f"[Voice] Wake word model '{model_name}' failed: {e}")
+                continue
+
+        print("[Voice] All wake word models failed — using always-on fallback.")
+        self._wake_model = None
 
     # ── Wake word mode ────────────────────────────────────────────────────
 
@@ -305,28 +318,48 @@ class VoiceThread(threading.Thread):
 
     def _transcribe(self, audio) -> Optional[str]:
         """
-        Try Google Web Speech (free, bilingual).
+        Try Google Web Speech with both languages simultaneously.
+
+        Strategy: call recognize_google with show_all=True to get all
+        results with confidence scores, then pick the highest-confidence
+        result across both language attempts.
+
         Falls back to offline Sphinx if no internet.
         """
-        # Try each language — return first successful result
+        best_text       = None
+        best_confidence = 0.0
+
         for lang in LANGUAGES:
             try:
-                text = self._recognizer.recognize_google(
+                # show_all=True returns list of alternatives with confidence
+                results = self._recognizer.recognize_google(
                     audio,
                     language=lang,
-                    show_all=False,
+                    show_all=True,
                 )
-                if text:
-                    return text.lower().strip()
+                if not results:
+                    continue
+
+                # results is a dict with 'alternative' list
+                alternatives = results.get("alternative", [])
+                for alt in alternatives:
+                    text       = alt.get("transcript", "").strip().lower()
+                    confidence = alt.get("confidence", 0.5)  # default 0.5 if missing
+                    if text and confidence > best_confidence:
+                        best_confidence = confidence
+                        best_text       = text
+
             except sr.UnknownValueError:
-                continue   # try next language
+                continue   # this language heard nothing
             except sr.RequestError:
                 print("[Voice] No internet — trying offline recognition.")
                 return self._transcribe_offline(audio)
             except Exception as e:
                 print(f"[Voice] Transcription error ({lang}): {e}")
 
-        return None
+        if best_text:
+            print(f"[Voice] Best transcript: '{best_text}' (conf={best_confidence:.2f})")
+        return best_text
 
     def _transcribe_offline(self, audio) -> Optional[str]:
         """Offline fallback using CMU Sphinx (English only)."""
@@ -338,9 +371,24 @@ class VoiceThread(threading.Thread):
     # ── Action dispatch ───────────────────────────────────────────────────
 
     def _dispatch(self, action: str, transcript: str):
-        """Fire action through GestureQueue — same path as gesture actions."""
+        """
+        Fire voice event through GestureQueue.
+
+        AUDIT FIX: transcript is now stored in event.metadata so that
+        ActionThread can use the ORIGINAL SPOKEN WORD (not the resolved
+        action) when looking up hybrid bindings.
+
+        Old: GestureEvent(name="voice:hotkey:ctrl+c")
+             → ActionThread had no way to know user said "copy"
+             → hybrid lookup used "hotkey:ctrl+c" as key → never matched
+
+        New: GestureEvent(name="voice:hotkey:ctrl+c", metadata="copy")
+             → ActionThread uses metadata="copy" as hybrid key
+             → ("copy", "click") found in HYBRID_BINDINGS → hybrid fires
+        """
         event = GestureEvent(
             name=f"voice:{action}",
             confidence=1.0,
+            metadata=transcript,   # preserve original spoken word for hybrid matching
         )
         self.gesture_queue.put_action(event)

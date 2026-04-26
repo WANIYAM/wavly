@@ -2,12 +2,16 @@
 WavlyTray — System tray icon for Wavly.
 
 Right-click menu:
-  Open Settings  → opens SettingsWindow
-  Pause / Resume → pauses gesture recognition (releases camera)
-  ─────────────
-  Quit Wavly    → clean shutdown (no terminal needed)
+  Open Settings       → opens SettingsWindow
+  Pause / Resume      → pauses gesture recognition
+  📊 Presentation     → toggle presentation mode manually
+  ─────────────────
+  Quit Wavly          → clean shutdown
 
-Also: Ctrl+Shift+Q works globally from anywhere.
+Tray icon colours:
+  Black  = normal active
+  Grey   = paused
+  Amber  = presentation mode active
 """
 
 from PyQt6.QtWidgets import QSystemTrayIcon, QMenu
@@ -16,13 +20,18 @@ from PyQt6.QtCore import Qt, QTimer
 from typing import Callable, Optional
 
 
-def _make_icon(active: bool = True) -> QIcon:
+def _make_icon(active: bool = True, presentation: bool = False) -> QIcon:
     size = 64
-    px = QPixmap(size, size)
+    px   = QPixmap(size, size)
     px.fill(Qt.GlobalColor.transparent)
     painter = QPainter(px)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    color = QColor("#111111") if active else QColor("#aaaaaa")
+    if presentation:
+        color = QColor("#f59e0b")   # amber in presentation mode
+    elif active:
+        color = QColor("#111111")
+    else:
+        color = QColor("#aaaaaa")
     painter.setBrush(QBrush(color))
     painter.setPen(Qt.PenStyle.NoPen)
     s = 2
@@ -39,15 +48,18 @@ def _make_icon(active: bool = True) -> QIcon:
 class WavlyTray(QSystemTrayIcon):
 
     def __init__(self, camera_thread, action_thread, settings_window_class,
-                 app, quit_fn: Optional[Callable] = None, parent=None):
+                 app, quit_fn: Optional[Callable] = None,
+                 presentation_mode=None, parent=None):
         super().__init__(parent)
         self._camera_thread = camera_thread
         self._action_thread = action_thread
         self._settings_cls  = settings_window_class
         self._app           = app
         self._quit_fn       = quit_fn or self._default_quit
+        self._pres_mode     = presentation_mode
         self._settings_win  = None
         self._paused        = False
+        self._pres_active   = False
 
         settings_window_class.camera_thread = camera_thread
 
@@ -56,7 +68,6 @@ class WavlyTray(QSystemTrayIcon):
         self._build_menu()
         self.activated.connect(self._on_activated)
         self.show()
-
         QTimer.singleShot(800, self._startup_message)
 
     def _startup_message(self):
@@ -82,6 +93,12 @@ class WavlyTray(QSystemTrayIcon):
 
         self._pause_act = menu.addAction("⏸  Pause")
         self._pause_act.triggered.connect(self._toggle_pause)
+
+        menu.addSeparator()
+
+        self._pres_act = menu.addAction("📊  Presentation Mode")
+        self._pres_act.triggered.connect(self._toggle_presentation)
+        self._pres_act.setCheckable(True)
 
         menu.addSeparator()
 
@@ -111,13 +128,47 @@ class WavlyTray(QSystemTrayIcon):
             self._pause_act.setText("▶  Resume")
             self.setIcon(_make_icon(active=False))
             self.setToolTip("Wavly — paused")
-            self.showMessage("Wavly", "Paused.", QSystemTrayIcon.MessageIcon.Information, 1500)
+            self.showMessage("Wavly", "Paused.",
+                             QSystemTrayIcon.MessageIcon.Information, 1500)
         else:
             self._camera_thread.resume()
             self._pause_act.setText("⏸  Pause")
-            self.setIcon(_make_icon(active=True))
+            self.setIcon(_make_icon(active=True, presentation=self._pres_active))
             self.setToolTip("Wavly — gesture control active")
-            self.showMessage("Wavly", "Resumed.", QSystemTrayIcon.MessageIcon.Information, 1500)
+            self.showMessage("Wavly", "Resumed.",
+                             QSystemTrayIcon.MessageIcon.Information, 1500)
+
+    def _toggle_presentation(self):
+        """Manual toggle from tray menu."""
+        if self._pres_mode is None:
+            return
+        self._pres_mode.toggle()
+        self._pres_active = self._pres_mode.active
+        self._pres_act.setChecked(self._pres_active)
+        self._update_pres_icon()
+
+    def set_presentation_active(self, active: bool):
+        """
+        Called by context_manager callback when PowerPoint is detected.
+        Updates tray icon and shows notification.
+        """
+        self._pres_active = active
+        self._pres_act.setChecked(active)
+        self._update_pres_icon()
+        msg = ("Presentation mode ON — laser pointer active"
+               if active else "Presentation mode OFF")
+        self.showMessage("Wavly 📊", msg,
+                         QSystemTrayIcon.MessageIcon.Information, 2500)
+
+    def _update_pres_icon(self):
+        self.setIcon(_make_icon(active=not self._paused,
+                                presentation=self._pres_active))
+        if self._pres_active:
+            self.setToolTip("Wavly — Presentation mode 📊")
+        elif self._paused:
+            self.setToolTip("Wavly — paused")
+        else:
+            self.setToolTip("Wavly — gesture control active")
 
     def _default_quit(self):
         self._camera_thread.stop()

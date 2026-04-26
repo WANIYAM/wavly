@@ -1,103 +1,66 @@
 """
-IntentResolver — Phase 4 Feature 2: Voice + Gesture Hybrid
+IntentResolver — Matches voice + gesture pairs to hybrid actions.
 
-Maps voice + gesture pairs to hybrid actions.
-Resolves intent from the combination of both signals.
+AUDIT FIX: Uses spoken transcript as the key, not the resolved action.
+  Old: resolve_hybrid(voice_action="hotkey:ctrl+c", gesture="click")
+       → key ("hotkey:ctrl+c", "click") → never found in bindings
+  New: resolve_hybrid(transcript="copy", gesture="click")
+       → key ("copy", "click") → found → returns "hotkey:ctrl+c"
 
-Example:
-  Voice: "open"
-  Gesture: "point"
-  → Hybrid Action: "open_file" (open file at pointed location)
-
-Reloads bindings dynamically so changes apply without restart.
+is_hybrid_eligible() checks if the transcript COULD pair with ANY gesture.
+It's used to decide whether to store in CommandQueue at all.
+Non-eligible voice commands execute immediately without waiting.
 """
 
 import importlib
-from typing import Optional, Tuple
-from dataclasses import dataclass
-
-
-@dataclass
-class HybridIntent:
-    """Result of hybrid intent resolution."""
-    voice_action: str
-    gesture_type: str
-    hybrid_action: str
-    confidence: float = 1.0  # Could be used for conflict resolution
+from typing import Optional
 
 
 class IntentResolver:
-    """
-    Matches (voice_action, gesture_type) pairs to hybrid actions.
-    
-    Workflow:
-      1. Voice command "open" arrives with transcript "open file"
-      2. User makes gesture "point" (pointing at a file)
-      3. IntentResolver.resolve_hybrid("open", "point") → "open_file"
-      4. ActionThread executes "open_file" action (application-specific)
-    
-    Thread-safe. Bindings are reloaded on each call.
-    """
 
-    def __init__(self):
-        self._bindings = {}
-        self._load_bindings()
+    def is_hybrid_eligible(self, transcript: str) -> bool:
+        """
+        Returns True if this transcript has ANY hybrid binding.
+        Used to decide whether to store in CommandQueue.
 
-    def resolve_hybrid(self, voice_action: str, gesture_type: str,
-                     voice_confidence: float = 1.0,
-                     gesture_confidence: float = 0.9) -> Optional[HybridIntent]:
+        Voice commands with no hybrid bindings execute immediately —
+        no point storing them and waiting 2 seconds for nothing.
         """
-        Resolve a hybrid intent from voice + gesture.
-        
-        Args:
-            voice_action: Action from voice command (e.g., "open")
-            gesture_type: Type of gesture detected (e.g., "point")
-            voice_confidence: Confidence of voice recognition (0-1)
-            gesture_confidence: Confidence of gesture detection (0-1)
-        
-        Returns:
-            HybridIntent with the matched action, or None if no match.
-        """
-        self._load_bindings()  # reload in case config changed
-        
-        key = (voice_action, gesture_type)
-        if key in self._bindings:
-            hybrid_action = self._bindings[key]
-            combined_conf = voice_confidence * gesture_confidence
-            
-            intent = HybridIntent(
-                voice_action=voice_action,
-                gesture_type=gesture_type,
-                hybrid_action=hybrid_action,
-                confidence=combined_conf,
-            )
-            print(f"[IntentResolver] Hybrid match: {voice_action} + {gesture_type} "
-                  f"→ {hybrid_action} ({combined_conf:.1%})")
-            return intent
-        
-        return None
-
-    def is_hybrid_available(self, voice_action: str) -> bool:
-        """
-        Check if this voice action can be paired with a gesture.
-        Used to decide whether to wait for a gesture or execute voice-only.
-        """
-        self._load_bindings()
-        # Check if any gesture can pair with this voice action
-        for (v_act, _), _ in self._bindings.items():
-            if v_act == voice_action:
+        bindings = self._load_bindings()
+        transcript_lower = transcript.lower().strip()
+        for (voice_key, _) in bindings:
+            if voice_key.lower() == transcript_lower:
                 return True
         return False
 
-    def _load_bindings(self):
-        """Load bindings from config/hybrid_bindings.py. Reloads dynamically."""
+    def resolve(self, transcript: str, gesture: str) -> Optional[str]:
+        """
+        Look up (transcript, gesture) in HYBRID_BINDINGS.
+        Returns action string or None if no match.
+
+        AUDIT FIX: Key uses transcript (spoken word), not resolved action.
+        """
+        bindings         = self._load_bindings()
+        transcript_lower = transcript.lower().strip()
+
+        # Exact match first
+        action = bindings.get((transcript_lower, gesture))
+        if action:
+            return action
+
+        # Try with spaces normalized to underscores
+        normalized = transcript_lower.replace(" ", "_")
+        action = bindings.get((normalized, gesture))
+        if action:
+            return action
+
+        return None
+
+    def _load_bindings(self) -> dict:
         try:
             import config.hybrid_bindings as hb
             importlib.reload(hb)
-            self._bindings = hb.HYBRID_BINDINGS
-        except ImportError:
-            print("[IntentResolver] hybrid_bindings.py not found — no hybrid commands available")
-            self._bindings = {}
+            return hb.HYBRID_BINDINGS
         except Exception as e:
-            print(f"[IntentResolver] Error loading bindings: {e}")
-            self._bindings = {}
+            print(f"[IntentResolver] Could not load hybrid_bindings: {e}")
+            return {}

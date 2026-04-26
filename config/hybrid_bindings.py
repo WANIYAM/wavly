@@ -1,125 +1,65 @@
 """
-Hybrid Voice + Gesture Command Bindings — Phase 4 Feature 2
+Hybrid Bindings — Voice + Gesture combined commands.
 
-Defines how voice commands combine with gestures to create powerful hybrid actions.
+Keys are (spoken_transcript, gesture_name) tuples.
+Values are the action to execute when BOTH arrive within 2 seconds.
 
-Format:
-  ("voice_action", "gesture_type"): "hybrid_action"
+AUDIT FIX: Keys use the SPOKEN WORD (transcript), not the resolved action.
+  Wrong: ("hotkey:ctrl+c", "click") — this is what the old code used
+  Right: ("copy", "click")          — this is what the transcript matches
 
-Example:
-  ("open", "point"): "open_pointed_file"
-  
-Gestures are named from GestureQueue events, typically:
-  - "point" = index finger pointing (lateral hand position)
-  - "air_letter:A" = drawing letter A
-  - "fingers_2", "fingers_3", "fingers_4" = showing N fingers
-  - "fist" = closed fist
-  - "palm" = open palm
-  - "pinch" = pinch gesture
-  - "swipe_left", "swipe_right" = swiping motions
+How it works:
+  1. User says "copy" → stored in CommandQueue with transcript="copy"
+  2. User makes a click gesture within 2 seconds
+  3. IntentResolver looks up ("copy", "click") → finds "copy_at_cursor"
+  4. Hybrid action fires instead of separate copy + click
 
-Voice actions are from config/voice_bindings.py, typically:
-  - "open", "copy", "paste", "save", "scroll_up", "scroll_down", etc.
-
-You can add any hybrid action name here — the meaning is defined by how
-ActionThread implements it in _execute_hybrid_action().
+Add your own hybrid commands below.
+Format: ("spoken word or phrase", "gesture_name"): "action"
 """
 
 HYBRID_BINDINGS: dict = {
 
-    # ── File Operations ───────────────────────────────────────────────────
-    ("open", "point"):
-        "open_at_cursor",     # Open file/folder at cursor position
-    
-    ("save", "fingers_2"):
-        "save_as",            # Save as... with filename dialog
-    
-    ("delete", "fist"):
-        "delete_confirmed",   # Delete with visual confirmation (closed fist = certain)
+    # ── Click-based hybrids ───────────────────────────────────────────────
+    # Say a word, then click to apply it at cursor position
 
+    ("copy",    "click"):         "hotkey:ctrl+c",   # say "copy" + click = copy selection
+    ("paste",   "click"):         "hotkey:ctrl+v",   # say "paste" + click = paste at click pos
+    ("cut",     "click"):         "hotkey:ctrl+x",   # say "cut" + click = cut selection
+    ("delete",  "click"):         "hotkey:delete",   # say "delete" + click = delete item
+    ("open",    "cursor_move"):   "hotkey:ctrl+o",   # say "open" + point = open file dialog
 
-    # ── Search ────────────────────────────────────────────────────────────
-    ("search", "air_letter"):
-        "search_for_letter",  # Search for the air-drawn letter
-    
-    ("search", "fingers_3"):
-        "search_for_word",    # Show search suggestions with 3 fingers = important
-    
-    ("find", "point"):
-        "find_at_cursor",     # Find text at cursor location
+    # ── Scroll-based hybrids ──────────────────────────────────────────────
+    # Say a direction, then scroll faster / to specific place
 
+    ("scroll up",   "scroll_up"):   "scroll_up_fast",    # double-speed scroll up
+    ("scroll down", "scroll_down"): "scroll_down_fast",  # double-speed scroll down
+    ("top",         "scroll_up"):   "hotkey:ctrl+home",  # say "top" + scroll = go to top
+    ("bottom",      "scroll_down"): "hotkey:ctrl+end",   # say "bottom" + scroll = go to end
 
-    # ── Navigation ────────────────────────────────────────────────────────
-    ("go_to", "fingers"):
-        "go_to_line_number",  # Go to line shown by fingers (2→line 2, 3→line 3, etc)
-    
-    ("page_up", "palm"):
-        "fast_page_up",       # Page up (open palm = emphatic, "push" up)
-    
-    ("page_down", "fist"):
-        "fast_page_down",     # Page down (closed fist = emphatic, "push" down)
-    
-    ("go_back", "swipe_right"):
-        "go_back_fast",       # Go back (right swipe reinforces direction)
-    
-    ("go_forward", "swipe_left"):
-        "go_forward_fast",    # Go forward (left swipe reinforces direction)
+    # ── Search hybrids ───────────────────────────────────────────────────
+    # Say "find" or "search", then air draw a letter to search for it
 
+    ("find",    "cursor_move"):   "hotkey:ctrl+f",   # say "find" + point = open find bar
+    ("search",  "cursor_move"):   "hotkey:ctrl+f",   # alias
 
-    # ── Text Editing ──────────────────────────────────────────────────────
-    ("select", "point"):
-        "select_from_cursor", # Start selection from cursor
-    
-    ("copy", "fingers_2"):
-        "copy_line",          # Copy current line (2 fingers = smaller scope)
-    
-    ("copy", "fingers_3"):
-        "copy_paragraph",     # Copy current paragraph (3 fingers = larger scope)
-    
-    ("paste", "point"):
-        "paste_at_cursor",    # Paste at cursor
-    
-    ("type", "air_letter"):
-        "type_letter",        # Type the air-drawn letter directly
+    # ── Window hybrids ───────────────────────────────────────────────────
 
+    ("close",   "stop"):          "hotkey:ctrl+w",   # say "close" + palm = close tab
+    ("save",    "stop"):          "hotkey:ctrl+s",   # say "save" + palm = save file
+    ("undo",    "drag_start"):    "hotkey:ctrl+z",   # say "undo" + fist = undo
 
-    # ── Voice Reinforcement (Same action + gesture = stronger signal) ────
-    # These are lower-priority but provide reinforcement for the voice signal
-    
-    ("click", "point"):
-        "click_at_point",     # Click where pointing (reinforces intent)
-    
-    ("scroll_up", "palm"):
-        "scroll_up_fast",     # Scroll up faster (palm = push motion)
-    
-    ("scroll_down", "fist"):
-        "scroll_down_fast",   # Scroll down faster (fist = push motion)
+    # ── Urdu hybrids ─────────────────────────────────────────────────────
 
+    ("کاپی",    "click"):         "hotkey:ctrl+c",   # Urdu "copy" + click
+    ("پیسٹ",    "click"):         "hotkey:ctrl+v",   # Urdu "paste" + click
+    ("بند کرو", "stop"):          "hotkey:ctrl+w",   # Urdu "close" + palm
+    ("محفوظ",   "stop"):          "hotkey:ctrl+s",   # Urdu "save" + palm
 }
 
-# ── Implementation hints for ActionThread._execute_hybrid_action() ────────
-#
-# When hybrid action is executed, ActionThread can call:
-#
-#   def _execute_hybrid_action(self, hybrid_action, voice_transcript, gesture_type):
-#       if hybrid_action == "open_at_cursor":
-#           x, y = self.gesture_queue.get_cursor()
-#           # Find what's at (x, y) and open it
-#           open_file_at_position(x, y)
-#
-#       elif hybrid_action == "search_for_letter":
-#           letter = extract_letter_from_transcript(voice_transcript)
-#           # Find gesture data to get drawn letter
-#           # Combine both: search for drawn letter + voice confirmation
-#           search(letter)
-#
-#       elif hybrid_action == "go_to_line_number":
-#           number = extract_number_from_voice(voice_transcript)
-#           # Or: count fingers from gesture
-#           # Extract line number: "go to 42" → 42
-#           go_to_line(number)
-#
-# The key insight: Hybrid actions can use BOTH the voice transcript
-# AND the gesture data (position, shape, timing) to be more powerful
-# than either alone.
-#
+# Custom speed-scroll actions (not standard pyautogui actions)
+# ActionThread handles these specially
+SPECIAL_HYBRID_ACTIONS = {
+    "scroll_up_fast":   ("scroll", +6),   # 6 units instead of default 3
+    "scroll_down_fast": ("scroll", -6),
+}

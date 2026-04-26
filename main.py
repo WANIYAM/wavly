@@ -1,6 +1,16 @@
 """
-Wavly — Phase 4 Complete
-Gesture + Air Drawing + Context + Adaptive Sensitivity + Voice Commands + Hybrid
+Wavly — AI-Powered Gesture Interface
+Single entry point for all phases.
+
+Features active:
+  ✓ Gesture control (cursor, click, scroll, drag)
+  ✓ Two-hand on-screen keyboard
+  ✓ Air drawing (letter → shortcut)
+  ✓ Context awareness (auto-adjusts per app)
+  ✓ Adaptive sensitivity (learns your hand)
+  ✓ Voice commands (say 'Hey Wavly' + command)
+
+Quit: Ctrl+Shift+Q | tray right-click → Quit | Settings → Quit
 """
 
 import sys
@@ -12,19 +22,27 @@ from core.camera_thread import CameraThread
 from core.action_thread import ActionThread
 from core.gesture_queue import GestureQueue
 from core.adaptive_engine import AdaptiveEngine
-from core.voice_thread import VoiceThread
-from core.command_queue import CommandQueue
-from core.intent_resolver import IntentResolver
 from ui.tray import WavlyTray
 from ui.settings_window import SettingsWindow
 from ui.keyboard import OnScreenKeyboard
+from ui.laser_pointer import LaserPointer
+from core.presentation_mode import PresentationMode
 from config.settings import Settings
 
+# Optional features — fail gracefully if deps missing
 try:
     from core.context_manager import ContextManager
-    CONTEXT_AVAILABLE = True
+    CONTEXT_OK = True
 except ImportError:
-    CONTEXT_AVAILABLE = False
+    CONTEXT_OK = False
+    print("[Wavly] Context manager unavailable (pip install pywin32 psutil)")
+
+try:
+    from core.voice_thread import VoiceThread
+    VOICE_OK = True
+except ImportError:
+    VOICE_OK = False
+    print("[Wavly] Voice unavailable (pip install SpeechRecognition pyaudio openwakeword sounddevice)")
 
 
 def main():
@@ -38,7 +56,25 @@ def main():
     settings      = Settings()
     gesture_queue = GestureQueue()
 
-    # ── Phase 4a: Adaptive Engine ─────────────────────────────────────────
+    # ── Phase 5: Laser pointer + Presentation mode ────────────────────────
+    laser = LaserPointer(color="red")
+
+    pres_mode = PresentationMode(
+        laser_pointer=laser,
+        on_action_fn=lambda action: print(f"[Pres] {action}"),
+    )
+
+    def on_context_change(context_name: str):
+        """Auto-activate/deactivate presentation mode based on active app."""
+        from PyQt6.QtCore import QTimer
+        if context_name == "Presentation":
+            QTimer.singleShot(0, pres_mode.activate)
+            tray.set_presentation_active(True)
+        else:
+            QTimer.singleShot(0, pres_mode.deactivate)
+            tray.set_presentation_active(False)
+
+    # ── Adaptive Engine ───────────────────────────────────────────────────
     adaptive = AdaptiveEngine(
         settings=settings,
         profile_path=settings.adaptive_profile_path,
@@ -46,15 +82,19 @@ def main():
     if settings.adaptive_enabled:
         gesture_queue.register_observer(adaptive.record_event)
         adaptive.start()
-        print("[Wavly] Adaptive engine active.")
+        print("[Wavly] ✓ Adaptive engine active")
 
-    # ── Phase 3: Context Manager ──────────────────────────────────────────
+    # ── Context Manager ───────────────────────────────────────────────────
     context_mgr = None
-    if CONTEXT_AVAILABLE and settings.context_aware_enabled:
-        context_mgr = ContextManager(poll_interval=settings.context_poll_interval)
+    if CONTEXT_OK and getattr(settings, "context_aware_enabled", True):
+        context_mgr = ContextManager(
+            poll_interval=getattr(settings, "context_poll_interval", 1.0),
+            on_context_change=on_context_change,   # Phase 5
+        )
         context_mgr.start()
+        print("[Wavly] ✓ Context awareness active")
 
-    # ── Keyboard ──────────────────────────────────────────────────────────
+    # ── On-Screen Keyboard ────────────────────────────────────────────────
     keyboard = OnScreenKeyboard()
 
     def toggle_keyboard_safe():
@@ -73,76 +113,46 @@ def main():
     def keyboard_is_visible() -> bool:
         return keyboard.isVisible()
 
-    # ── Phase 4b: Voice Thread ────────────────────────────────────────────
-    # Voice callbacks must update Qt widgets — post to main thread via QTimer
+    # ── Voice Thread ──────────────────────────────────────────────────────
+    voice_thread = None
+    if VOICE_OK and getattr(settings, "voice_enabled", True):
 
-    def on_listening_safe():
-        QTimer.singleShot(0, lambda: _update_voice_panel("listening"))
+        def on_listening_safe():
+            win = SettingsWindow._current_instance
+            if win and hasattr(win, "_voice_panel"):
+                QTimer.singleShot(0, win._voice_panel.on_listening)
 
-    def on_heard_safe():
-        QTimer.singleShot(0, lambda: _update_voice_panel("heard"))
+        def on_heard_safe():
+            win = SettingsWindow._current_instance
+            if win and hasattr(win, "_voice_panel"):
+                QTimer.singleShot(0, win._voice_panel.on_heard)
 
-    def on_result_safe(transcript, action):
-        QTimer.singleShot(0, lambda: _update_voice_panel("result", transcript, action))
+        def on_result_safe(transcript, action):
+            win = SettingsWindow._current_instance
+            if win and hasattr(win, "_voice_panel"):
+                QTimer.singleShot(0, lambda: win._voice_panel.on_result(transcript, action))
 
-    def _update_voice_panel(event, transcript=None, action=None):
-        win = SettingsWindow._current_instance
-        if win and hasattr(win, "_voice_panel"):
-            if event == "listening":
-                win._voice_panel.on_listening()
-            elif event == "heard":
-                win._voice_panel.on_heard()
-            elif event == "result":
-                win._voice_panel.on_result(transcript, action)
-
-    # ── Phase 4 Step 10: Feedback callbacks ───────────────────────────────
-    def _update_feedback_panel(event, source=None, gesture=None, action=None, success=None):
-        win = SettingsWindow._current_instance
-        if win and hasattr(win, "_feedback_panel"):
-            if event == "gesture_detected" and gesture is not None:
-                win._feedback_panel.on_gesture_detected(gesture, 1.0)
-            elif event == "action_executed":
-                win._feedback_panel.on_action_executed(
-                    source or "", gesture or "", action or "", bool(success)
-                )
-
-    def on_action_executed_safe(source, gesture, action, success):
-        """Thread-safe proxy: ActionThread → main Qt thread."""
-        QTimer.singleShot(
-            0,
-            lambda: _update_feedback_panel(
-                "action_executed", source, gesture, action, success
-            )
+        voice_thread = VoiceThread(
+            gesture_queue=gesture_queue,
+            on_listening_fn=on_listening_safe,
+            on_heard_fn=on_heard_safe,
+            on_result_fn=on_result_safe,
         )
-
-    voice_thread = VoiceThread(
-        gesture_queue=gesture_queue,
-        on_listening_fn=on_listening_safe,
-        on_heard_fn=on_heard_safe,
-        on_result_fn=on_result_safe,
-    )
-
-    if getattr(settings, "voice_enabled", True):
         voice_thread.start()
-        print("[Wavly] Voice thread active — say 'Hey Wavly' to use voice commands.")
+        print("[Wavly] ✓ Voice thread active — say 'Hey Wavly' to use")
 
-    # ── Threads ───────────────────────────────────────────────────────────
-    # ── Phase 4c: Command Queue + Intent Resolver (Hybrid) ────────────────
-    command_queue   = CommandQueue(timeout_secs=2.0)
-    intent_resolver = IntentResolver()
-    print("[Wavly] Hybrid voice+gesture infrastructure ready.")
-
+    # ── Action Thread ─────────────────────────────────────────────────────
     action_thread = ActionThread(
         gesture_queue, settings,
         keyboard_toggle_fn=toggle_keyboard_safe,
         context_manager=context_mgr,
-        on_action_executed=on_action_executed_safe,
-        command_queue=command_queue,
-        intent_resolver=intent_resolver,
     )
+
+    # ── Camera Thread ─────────────────────────────────────────────────────
     camera_thread = CameraThread(
         gesture_queue, settings,
         adaptive_engine=adaptive,
+        presentation_mode=pres_mode,   # Phase 5
     )
     camera_thread.set_keyboard_fns(
         update_fn=update_keyboard_safe,
@@ -153,16 +163,19 @@ def main():
     action_thread.daemon = True
     camera_thread.start()
     action_thread.start()
+    print("[Wavly] ✓ Camera and action threads running")
 
     # ── Inject into SettingsWindow ────────────────────────────────────────
-    SettingsWindow.adaptive_engine = adaptive
-    SettingsWindow.voice_thread    = voice_thread
-    SettingsWindow._current_instance = None   # set when window opens
+    SettingsWindow.camera_thread    = camera_thread
+    SettingsWindow.adaptive_engine  = adaptive
+    SettingsWindow.voice_thread     = voice_thread
+    SettingsWindow._current_instance = None
 
     # ── Clean quit ────────────────────────────────────────────────────────
     def quit_wavly():
         print("[Wavly] Shutting down...")
-        voice_thread.stop()
+        if voice_thread:
+            voice_thread.stop()
         if context_mgr:
             context_mgr.stop()
         adaptive.stop()
@@ -177,22 +190,24 @@ def main():
         settings_window_class=SettingsWindow,
         app=app,
         quit_fn=quit_wavly,
+        presentation_mode=pres_mode,   # Phase 5: manual toggle
     )
 
+    # ── Global quit shortcut ──────────────────────────────────────────────
     shortcut = QShortcut(QKeySequence("Ctrl+Shift+Q"), keyboard)
     shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
     shortcut.activated.connect(quit_wavly)
 
     SettingsWindow.quit_fn = staticmethod(quit_wavly)
 
-    print("[Wavly] Phase 4 complete — all features active.")
-    print("[Wavly] Voice: say 'Hey Wavly' then your command (English or Urdu)")
+    print("[Wavly] Ready. Right-click tray icon for options.")
     print("[Wavly] Quit: Ctrl+Shift+Q  |  tray → Quit  |  Settings → Quit")
 
     try:
         exit_code = app.exec()
     finally:
-        voice_thread.stop()
+        if voice_thread:
+            voice_thread.stop()
         if context_mgr:
             context_mgr.stop()
         adaptive.stop()
